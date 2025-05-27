@@ -9,6 +9,7 @@ pydantic-settings==2.2.1
 neo4j==5.14.1
 chromadb==0.4.15
 sqlalchemy==2.0.23
+motor
 
 # AI/ML
 deepgram-sdk==2.12.0
