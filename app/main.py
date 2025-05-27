@@ -45,13 +45,13 @@ async def security_middleware(request: Request, call_next):
         )
     
     # Verify request signature for non-GET requests
-    if request.method != "GET":
-        signature = request.headers.get("X-Request-Signature")
-        if not signature or not security_manager.verify_request_signature(request, signature):
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Invalid request signature"}
-            )
+    # if request.method != "GET":
+    #     signature = request.headers.get("X-Request-Signature")
+    #     if not signature or not security_manager.verify_request_signature(request, signature):
+    #         return JSONResponse(
+    #             status_code=401,
+    #             content={"detail": "Invalid request signature"}
+    #         )
     
     response = await call_next(request)
     return response
