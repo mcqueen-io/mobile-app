@@ -50,7 +50,7 @@ class SecurityManager:
         self.request_counts[client_id].append(current_time)
         return True
 
-    def verify_request_signature(self, request: Request, signature: str) -> bool:
+    async def verify_request_signature(self, request: Request, signature: str) -> bool:
         # Get request body
         body = await request.body()
         
