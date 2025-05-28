@@ -1,62 +1,86 @@
-# In-Car AI Assistant
+# Voice Recognition Mobile App
 
-An intelligent in-car assistant that provides personalized experiences through voice interaction, safety monitoring, and smart features.
+A mobile application with advanced voice recognition capabilities, including noise suppression and speaker identification.
 
 ## Features
 
-- Voice-based interactive AI wrapper
-- User data management with family tree support
-- Smart conversation and activity recommendations
-- Event tracking and follow-ups
-- Safety monitoring and sleep detection
-- Integration with various services (email, maps, etc.)
-- Natural language navigation assistance
+- Voice recording with noise suppression
+- Speaker identification using voice embeddings
+- Voice feature extraction using Resemblyzer
+- Speaker registration and verification
+- Test suite for voice recognition functionality
 
 ## Project Structure
 
 ```
-backend/
+mobile-app/
 ├── app/
-│   ├── api/            # API endpoints
-│   ├── core/           # Core business logic
-│   ├── db/             # Database models and connections
-│   ├── services/       # External service integrations
-│   └── utils/          # Utility functions
-├── tests/              # Test files
-└── config/             # Configuration files
+│   ├── modules/
+│   │   └── voice_layer/
+│   │       ├── voice_processor.py
+│   │       └── test_voice_recognition.py
+│   └── config/
+│       └── config.template.py
+├── models/
+│   └── vosk-model-small-en-us/
+├── pretrained_models/
+├── test_recordings/
+├── requirements.txt
+└── README.md
 ```
 
 ## Setup
 
-1. Create a virtual environment:
+1. Clone the repository:
+```bash
+git clone <repository-url>
+cd mobile-app
+```
+
+2. Create and activate a virtual environment:
 ```bash
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
-2. Install dependencies:
+3. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-3. Set up environment variables:
-```bash
-cp .env.example .env
-# Edit .env with your configuration
-```
+4. Configuration:
+   - Copy `app/config/config.template.py` to `app/config/config.py`
+   - Update the configuration values in `config.py` with your settings
+   - Never commit `config.py` to version control
 
-4. Run the development server:
+## Usage
+
+Run the voice recognition test:
 ```bash
-uvicorn app.main:app --reload
+python -m app.modules.voice_layer.test_voice_recognition
 ```
 
 ## Development
 
-- Backend: Python with FastAPI
-- Database: Neo4j (Graph DB), ChromaDB (Vector DB)
-- Voice Processing: Deepgram
-- AI: OpenAI GPT
+- The project uses Python 3.8+
+- Voice processing is handled by the `voice_processor.py` module
+- Test recordings are stored in the `test_recordings` directory
+- Pretrained models are stored in the `pretrained_models` directory
+
+## Security
+
+- API keys and sensitive data should be stored in `config.py`
+- Never commit `config.py` to version control
+- Use environment variables for sensitive data in production
 
 ## License
 
-Proprietary - All rights reserved 
+[Your License Here]
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Commit your changes
+4. Push to the branch
+5. Create a Pull Request 

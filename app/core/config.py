@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     NEO4J_USER: str = os.getenv("NEO4J_USER", "neo4j")
     NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "password")
     
+    # MongoDB
+    MONGODB_URI: str
+    
     # Vector Database
     CHROMA_PERSIST_DIRECTORY: str = os.getenv("CHROMA_PERSIST_DIRECTORY", "./data/chroma")
     
@@ -46,7 +49,18 @@ class Settings(BaseSettings):
     # MCP Settings
     MCP_SERVER_URL: str = os.getenv("MCP_SERVER_URL", "http://localhost:8001")
     
+    # Google Cloud Settings
+    GOOGLE_CLOUD_PROJECT: str
+    GOOGLE_CLOUD_LOCATION: str = "us-central1"
+    GOOGLE_APPLICATION_CREDENTIALS: str
+    
+    # Gemini Settings
+    GEMINI_MODEL_NAME: str = "gemini-2.0-flash-001"
+    GEMINI_MAX_OUTPUT_TOKENS: int = 1024
+    GEMINI_TEMPERATURE: float = 0.7
+    
     class Config:
         case_sensitive = True
+        env_file = ".env"
 
 settings = Settings() 
