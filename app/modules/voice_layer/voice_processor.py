@@ -20,23 +20,23 @@ import collections
 import logging
 from app.modules.ai_wrapper.gemini_wrapper import get_gemini_wrapper, GeminiWrapper
 from app.db.chroma_manager import get_chroma_manager, ChromaManager
-from app.services.user_service import get_user_service, UserService
-from app.services.context_service import get_context_service, ContextService
+from app.services.unified_service import get_unified_service, UnifiedService
+from deepgram import Deepgram
 from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
 
 class VoiceProcessor:
-    def __init__(self, gemini_wrapper: GeminiWrapper, user_service: UserService, context_service: ContextService):
+    def __init__(self, unified_service: UnifiedService):
         self.deepgram = None
         if hasattr(settings, 'DEEPGRAM_API_KEY') and settings.DEEPGRAM_API_KEY:
             try:
-                from deepgram import Deepgram
                 self.deepgram = Deepgram(settings.DEEPGRAM_API_KEY)
+                logger.info("Deepgram client initialized successfully.")
             except Exception as e:
-                print(f"Warning: Could not initialize Deepgram: {e}")
+                logger.error(f"Warning: Could not initialize Deepgram: {e}")
         else:
-            print("Warning: Deepgram API key not found. Deepgram features will be disabled.")
+            logger.warning("Warning: Deepgram API key not found. Deepgram features will be disabled.")
         
         self.websocket: Optional[WebSocket] = None
         self.voice_encoder = None
@@ -48,9 +48,7 @@ class VoiceProcessor:
         self.embedding_size = 192  # ECAPA-TDNN embedding size
         
         # Assign dependencies
-        self.gemini_wrapper = gemini_wrapper
-        self.user_service = user_service
-        self.context_service = context_service
+        self.unified_service = unified_service
         
         # Initialize voice encoder and VAD
         self._initialize_voice_models()
@@ -327,7 +325,7 @@ class VoiceProcessor:
             else:
                 logger.info("No results from ChromaDB query")
                 return None
-
+            
         except Exception as e:
             logger.error(f"Error identifying speaker from ChromaDB: {str(e)}")
             return None
@@ -341,7 +339,6 @@ class VoiceProcessor:
             print("Deepgram is not initialized. Streaming is unavailable.")
             return None
         try:
-            from deepgram import Deepgram
             self.websocket = await self.deepgram.transcription.live({
                 'punctuate': True,
                 'interim_results': False,
@@ -392,11 +389,11 @@ class VoiceProcessor:
 
             # --- Initial call to Gemini with proactive context ---
 
-            # Get proactive context from ContextService
-            proactive_context = await self.context_service.get_relevant_context(identified_user_id, transcript)
+            # Get proactive context from UnifiedService
+            proactive_context = await self.unified_service.get_relevant_context([identified_user_id], transcript)
             
             logger.info("Calling Gemini wrapper with initial context...")
-            gemini_response = await self.gemini_wrapper.generate_response(
+            gemini_response = await get_gemini_wrapper().generate_response(
                 user_id=identified_user_id, # Pass user ID
                 user_input=transcript, # Pass the transcript
                 context=proactive_context # Pass proactive context
@@ -405,7 +402,7 @@ class VoiceProcessor:
             # --- Process Gemini's response (text or tool call) ---
 
             if isinstance(gemini_response, list):
-                # Gemini returned tool calls - Execute them via ContextService/CPL
+                # Gemini returned tool calls - Execute them via UnifiedService/CPL
                 logger.info(f"Gemini requested tool calls: {gemini_response}")
                 
                 tool_results = []
@@ -421,14 +418,14 @@ class VoiceProcessor:
                     }
                     
                     try:
-                        # --- Execute tool call using ContextService (or MCP for others) ---
+                        # --- Execute tool call using UnifiedService (or MCP for others) ---
                         if tool_name == "get_user_preference":
                             # Ensure user_id from identification is passed if not already in args
                             if "user_id" not in tool_args:
                                 tool_args["user_id"] = identified_user_id
                                 logger.warning(f"user_id not in tool_args for {tool_name}, using identified_user_id: {identified_user_id}")
 
-                            preference_result = await self.context_service.get_user_preference(**tool_args)
+                            preference_result = await self.unified_service.get_user_preference(**tool_args)
                             # Ensure the result content is a JSON string
                             result["content"] = json.dumps(preference_result)
                             
@@ -438,7 +435,7 @@ class VoiceProcessor:
                                 tool_args["user_id"] = identified_user_id
                                 logger.warning(f"user_id not in tool_args for {tool_name}, using identified_user_id: {identified_user_id}")
 
-                            memories_result = await self.context_service.search_memories(**tool_args)
+                            memories_result = await self.unified_service.search_memories(**tool_args)
                              # Ensure the result content is a JSON string
                             result["content"] = json.dumps(memories_result)
 
@@ -466,7 +463,7 @@ class VoiceProcessor:
                     # Call generate_response again, this time with tool_results.
                     # We also pass the original transcript again to maintain context, although
                     # the chat history in ChatSession should handle the turn structure.
-                    final_response = await self.gemini_wrapper.generate_response(
+                    final_response = await get_gemini_wrapper().generate_response(
                         user_id=identified_user_id, # Pass user ID
                         user_input=transcript, # Pass original transcript
                         tool_results=tool_results # Pass the results of tool execution
@@ -547,24 +544,42 @@ class VoiceProcessor:
             if self.websocket:
                 await self.websocket.send_json({"type": "error", "message": error_message})
 
-    async def process_audio(self, audio_data: bytes) -> None:
-        """Process audio data through the WebSocket and potentially extract embeddings"""
-        if self.websocket and self.deepgram:
-            # Send audio to Deepgram for transcription
-            # TODO: Handle potential exceptions during send
-            try:
-                await self.websocket.send(audio_data)
-                # logger.debug("Sent audio data to Deepgram WebSocket.")
-            except Exception as e:
-                logger.error(f"Error sending audio to Deepgram: {str(e)}")
-                # TODO: Implement reconnection logic or error handling
+    async def process_audio(self, audio_data: bytes, user_id: str) -> None:
+        """
+        Process incoming audio data for a specific user.
+        This is a simplified example, in a real app this would involve:
+        1. User/session management
+        2. Passing user context to Deepgram or other ASR
+        3. Sending data in appropriate chunks
+        """
+        logger.debug(f"Processing {len(audio_data)} bytes of audio for user {user_id}")
 
-        # TODO: Process audio_data locally for VAD and embedding extraction
-        # This local processing is needed for real-time speaker identification before a full transcript is available.
-        # This would involve buffering audio, running VAD, and extracting embeddings periodically.
-        # The identified speaker from this process can update self.current_speaker
-        # which is then used as a hint in _process_transcript.
-        # For now, this is a placeholder.
+        # TODO: Implement actual audio processing and sending to Deepgram/ASR
+        # For demonstration, simply acknowledge receipt
+        # await self.deepgram_client.send_audio(audio_data)
+
+        # TODO: Handle potential exceptions during send
+        try:
+            if self.websocket:
+                await self.websocket.send(audio_data)
+                logger.debug("Sent audio data to Deepgram WebSocket.")
+            else:
+                logger.warning("Deepgram WebSocket is not connected. Cannot send audio.")
+        except Exception as e:
+            logger.error(f"Error sending audio to Deepgram: {str(e)}")
+        # TODO: Implement reconnection logic or error handling
+
+    async def get_user_voice_settings(self, user_id: str) -> Dict[str, Any]:
+        """
+        Retrieve or determine user-specific voice settings/preferences.
+        This could involve looking up preferences in the database via UnifiedService.
+        """
+        # Example: Fetch user preferences (simplified)
+        user = await self.unified_service.get_user(user_id)
+        if user and user.preferences:
+            # Assuming 'voice_settings' is a dictionary within UserPreferences
+            return user.preferences.voice_settings.model_dump() # Use model_dump if voice_settings is a Pydantic model
+        return {} # Default empty settings
 
     async def stop_stream(self) -> None:
         """Stop the WebSocket stream"""
@@ -580,13 +595,14 @@ class VoiceProcessor:
             finally:
                 self.websocket = None # Ensure the websocket object is cleared
 
-# Singleton instance and getter function
+# Singleton instance
 _voice_processor = None
 
-async def get_voice_processor(gemini_wrapper: GeminiWrapper, user_service: UserService, context_service: ContextService) -> VoiceProcessor:
-    """Get singleton instance of VoiceProcessor"""
+async def get_voice_processor() -> VoiceProcessor:
+    """Get or initialize singleton instance of VoiceProcessor"""
     global _voice_processor
     if _voice_processor is None:
-        # Pass all dependencies to the VoiceProcessor constructor
-        _voice_processor = VoiceProcessor(gemini_wrapper, user_service, context_service)
+        unified_service = await get_unified_service()
+        # Pass only unified_service to the constructor
+        _voice_processor = VoiceProcessor(unified_service)
     return _voice_processor 

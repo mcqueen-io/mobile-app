@@ -35,12 +35,14 @@ class VoiceProfile(BaseModel):
 class User(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     name: str
+    username: str
     voice_id: str
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     preferences: UserPreferences = Field(default_factory=UserPreferences)
     relationships: List[Relationship] = Field(default_factory=list)
     voice_profile: Optional[VoiceProfile] = None
+    family_tree_id: Optional[str] = None
 
     class Config:
         json_encoders = {

@@ -12,11 +12,24 @@ async def setup_test_family():
     """Set up a test family tree with 5 members and their relationships"""
     mongo_manager = await get_mongo_manager()
     
+    # Drop collections if they exist to ensure a clean test state
+    for collection_name in ['users', 'memories']:
+        if collection_name in await mongo_manager.db.list_collection_names():
+            logger.info(f"Dropping existing collection: {collection_name}")
+            await mongo_manager.db.drop_collection(collection_name)
+
+    # Create a text index on the 'content' field of the memories collection
+    logger.info("Creating text index on 'memories.content'...")
+    await mongo_manager.db.memories.create_index([('content', 'text')])
+    logger.info("Text index created.")
+
     # Create family members
     family_members = [
         {
+            "_id": "dad_123",
             "user_id": "dad_123",
             "name": "John Smith",
+            "username": "john_smith",
             "email": "john.smith@example.com",
             "family_tree_id": "smith_family_001",
             "preferences": {
@@ -28,11 +41,14 @@ async def setup_test_family():
                     "model": "Camry",
                     "color": "silver"
                 }
-            }
+            },
+            "voice_id": "voice_dad_123"
         },
         {
+            "_id": "mom_123",
             "user_id": "mom_123",
             "name": "Mary Smith",
+            "username": "mary_smith",
             "email": "mary.smith@example.com",
             "family_tree_id": "smith_family_001",
             "preferences": {
@@ -44,11 +60,14 @@ async def setup_test_family():
                     "model": "CR-V",
                     "color": "blue"
                 }
-            }
+            },
+            "voice_id": "voice_mom_123"
         },
         {
+            "_id": "son_123",
             "user_id": "son_123",
             "name": "Mike Smith",
+            "username": "mike_smith",
             "email": "mike.smith@example.com",
             "family_tree_id": "smith_family_001",
             "preferences": {
@@ -59,11 +78,14 @@ async def setup_test_family():
                     "model": "Model 3",
                     "color": "red"
                 }
-            }
+            },
+            "voice_id": "voice_son_123"
         },
         {
+            "_id": "daughter_123",
             "user_id": "daughter_123",
             "name": "Sarah Smith",
+            "username": "sarah_smith",
             "email": "sarah.smith@example.com",
             "family_tree_id": "smith_family_001",
             "preferences": {
@@ -74,11 +96,14 @@ async def setup_test_family():
                     "model": "Crosstrek",
                     "color": "green"
                 }
-            }
+            },
+            "voice_id": "voice_daughter_123"
         },
         {
+            "_id": "youngest_123",
             "user_id": "youngest_123",
             "name": "Tom Smith",
+            "username": "tom_smith",
             "email": "tom.smith@example.com",
             "family_tree_id": "smith_family_001",
             "preferences": {
@@ -89,7 +114,8 @@ async def setup_test_family():
                     "model": "Mustang",
                     "color": "black"
                 }
-            }
+            },
+            "voice_id": "voice_youngest_123"
         }
     ]
 

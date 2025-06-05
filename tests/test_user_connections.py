@@ -138,6 +138,7 @@ async def main():
     try:
         # Initialize MongoDB
         mongo_manager = await get_mongo_manager()
+        await mongo_manager.ensure_initialized()
         await mongo_manager.create_collections()
         
         # Create test users
@@ -156,9 +157,8 @@ async def main():
         logger.error(f"Error during testing: {str(e)}")
     finally:
         # Clean up
-        # Ensure mongo_manager was successfully initialized before attempting to close
         if 'mongo_manager' in locals() and mongo_manager is not None:
-             await mongo_manager.close()
+            await mongo_manager.close()
 
 if __name__ == "__main__":
     asyncio.run(main()) 

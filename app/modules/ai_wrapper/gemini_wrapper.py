@@ -6,6 +6,22 @@ from vertexai.preview.generative_models import GenerativeModel, ChatSession, Gen
 from app.core.config import settings
 import json
 
+# Attempt to load environment variables from .env file
+# Note: This should be done at the application entry point, but included here
+# as a fallback/demonstration.
+# from dotenv import load_dotenv
+# load_dotenv()
+
+# Explicitly set the credentials file path for debugging
+# TODO: Revert to loading from environment variable after debugging
+# CREDENTIALS_FILE_PATH = "google-1.5-AI.json" # Directly specify the path relative to project root
+
+# Initialize Vertex AI
+# Use the hardcoded values for project and location during this debugging phase
+# Revert to using settings after the credential issue is resolved
+vertexai.init(project=settings.GOOGLE_CLOUD_PROJECT, location=settings.GOOGLE_CLOUD_LOCATION)
+# vertexai.init(project=settings.GOOGLE_CLOUD_PROJECT, location=settings.GOOGLE_CLOUD_LOCATION, credentials_file=CREDENTIALS_FILE_PATH)
+
 logger = logging.getLogger(__name__)
 
 # Define tool specifications for Context Service interactions (CPL)
@@ -55,12 +71,6 @@ class GeminiWrapper:
     def __init__(self):
         """Initialize Gemini wrapper with Vertex AI and tools"""
         try:
-            # Initialize Vertex AI
-            vertexai.init(
-                project=settings.GOOGLE_CLOUD_PROJECT,
-                location=settings.GOOGLE_CLOUD_LOCATION
-            )
-            
             # Define the system instruction/prompt for the AI's role
             self.system_instruction = """You are an in-car AI assistant named 'Queen'.\n"\
                                       "Your primary goal is to assist the driver and passengers safely and effectively.\n"\

@@ -1,12 +1,20 @@
+import os
+import sys
+print(f"Loading mongo_manager.py from: {__file__}") # Print file path
+
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import MongoClient, IndexModel, ASCENDING, DESCENDING
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 import logging
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 import os
 from datetime import datetime
 import asyncio
 import time
+from app.core.cache_manager import get_cache_manager, CacheManager
+from bson import ObjectId
+
+logger = logging.getLogger(__name__)
 
 class MongoManager:
     _instance = None
@@ -15,40 +23,60 @@ class MongoManager:
     _family_tree_cache: Dict[str, Dict[str, set]] = {}  # Cache: {family_id: {user_id: {related_user_ids}}}
     _memory_cache = {}  # LRU cache for frequently accessed memories
     _cache_ttl = 300  # 5 minutes cache TTL
+    _last_cache_update: float = 0
+    _cache_lock = asyncio.Lock()  # Add missing cache lock
 
-    def __new__(cls):
+    def __new__(cls, *args, **kwargs):
         if cls._instance is None:
             cls._instance = super(MongoManager, cls).__new__(cls)
+            cls._instance._initialized = False
+            cls._instance._init_lock = asyncio.Lock()
         return cls._instance
 
+    def __init__(self, cache_manager: CacheManager):
+        self.cache = cache_manager
+        if not hasattr(self, '_initialized'):
+            self._initialized = False
+            self._init_lock = asyncio.Lock()
+
+    async def ensure_initialized(self):
+        """Ensure the manager is initialized before use"""
+        if not self._initialized:
+            async with self._init_lock:
+                if not self._initialized:
+                    await self.initialize()
+
     async def initialize(self):
-        """Initialize MongoDB client with connection pooling (async)"""
-        if self._client is None:
-            try:
-                # Get MongoDB URI from environment variable or use default
-                mongo_uri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017')
-                
-                # Initialize async client
-                self._client = AsyncIOMotorClient(
-                    mongo_uri,
-                    maxPoolSize=50,
-                    minPoolSize=10,
-                    maxIdleTimeMS=30000,
-                    waitQueueTimeoutMS=10000,
-                    connectTimeoutMS=20000,
-                    serverSelectionTimeoutMS=5000
-                )
-                
-                # Get database
-                self._db = self._client.family_assistant
-                
-                # Test connection
-                await self._client.admin.command('ping')
-                logging.info("Successfully connected to MongoDB")
-                
-            except (ConnectionFailure, ServerSelectionTimeoutError) as e:
-                logging.error(f"Failed to connect to MongoDB: {str(e)}")
-                raise
+        """Initialize MongoDB connection"""
+        if not self._initialized:
+            async with self._init_lock:
+                if not self._initialized:
+                    try:
+                        # Get MongoDB URI from environment variable or use default
+                        mongo_uri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017')
+                        
+                        # Initialize async client
+                        self._client = AsyncIOMotorClient(
+                            mongo_uri,
+                            maxPoolSize=50,
+                            minPoolSize=10,
+                            maxIdleTimeMS=30000,
+                            waitQueueTimeoutMS=10000,
+                            connectTimeoutMS=20000,
+                            serverSelectionTimeoutMS=5000
+                        )
+                        
+                        # Get database
+                        self._db = self._client.family_assistant
+                        
+                        # Test connection
+                        await self._client.admin.command('ping')
+                        logger.info("Successfully connected to MongoDB")
+                        
+                        self._initialized = True
+                    except (ConnectionFailure, ServerSelectionTimeoutError) as e:
+                        logger.error(f"Failed to connect to MongoDB: {str(e)}")
+                        raise
 
     async def close(self):
         """Close MongoDB connection"""
@@ -56,14 +84,13 @@ class MongoManager:
             self._client.close()
             self._client = None
             self._db = None
-            logging.info("MongoDB connection closed")
+            logger.info("MongoDB connection closed")
 
     @property
     def db(self):
         """Get database instance"""
-        if self._db is None:
-            logging.error("MongoDB client not initialized when accessing db property!")
-            raise ConnectionFailure("MongoDB client not initialized.")
+        if not self._initialized:
+            raise ConnectionFailure("MongoDB client not initialized. Call initialize() first.")
         return self._db
 
     async def create_collections(self):
@@ -75,7 +102,7 @@ class MongoManager:
             # Drop collections if they exist to ensure a clean test state
             for collection_name in ['users', 'events', 'preferences_history', 'memories']:
                 if collection_name in await db.list_collection_names():
-                    logging.info(f"Dropping existing collection: {collection_name}")
+                    logger.info(f"Dropping existing collection: {collection_name}")
                     await db.drop_collection(collection_name)
 
             # Users collection with enhanced indexes
@@ -124,37 +151,42 @@ class MongoManager:
                 IndexModel([('metadata.tags', ASCENDING)]),
                 IndexModel([('metadata.participants', ASCENDING)])
             ]
+            # Create indexes. MongoDB's create_indexes is idempotent.
             await db.memories.create_indexes(memory_indexes)
             
-            logging.info("Successfully created collections and indexes")
+            logger.info("Successfully created collections and indexes")
             
         except Exception as e:
-            logging.error(f"Error creating collections: {str(e)}")
+            logger.error(f"Error creating collections: {str(e)}")
             raise
 
-    async def create_user(self, user_data: dict) -> str:
+    async def create_user(self, user_data: Dict[str, Any]) -> str:
         """Create a new user with proper timestamps and family_tree_id"""
         try:
             # Ensure family_tree_id is provided or generated (placeholder for now)
             if 'family_tree_id' not in user_data or not user_data['family_tree_id']:
                 # In a real application, you'd have logic to assign/create a family_tree_id
                 # For now, let's raise an error or assign a default/placeholder
-                logging.warning("Creating user without family_tree_id. Assigning a placeholder.")
+                logger.warning("Creating user without family_tree_id. Assigning a placeholder.")
                 # Example placeholder (replace with proper logic later)
                 user_data['family_tree_id'] = 'default_family'
+
+            # Convert id to _id for MongoDB
+            if 'id' in user_data:
+                user_data['_id'] = user_data.pop('id')
 
             user_data.update({
                 'created_at': datetime.utcnow(),
                 'updated_at': datetime.utcnow()
             })
             result = await self.db.users.insert_one(user_data)
-            logging.info(f"User created with ID: {result.inserted_id} and family_tree_id: {user_data['family_tree_id']}")
+            logger.info(f"User created with ID: {result.inserted_id} and family_tree_id: {user_data['family_tree_id']}")
             return str(result.inserted_id)
         except Exception as e:
-            logging.error(f"Error creating user: {str(e)}")
+            logger.error(f"Error creating user: {str(e)}")
             raise
 
-    async def update_user(self, user_id: str, update_data: dict) -> bool:
+    async def update_user(self, user_id: str, update_data: Dict[str, Any]) -> bool:
         """Update user data with proper timestamp"""
         try:
             update_data['updated_at'] = datetime.utcnow()
@@ -162,17 +194,33 @@ class MongoManager:
                 {'_id': user_id},
                 {'$set': update_data}
             )
+            # Invalidate cache
+            await self.cache.delete(self.cache.generate_key("user", user_id))
             return result.modified_count > 0
         except Exception as e:
-            logging.error(f"Error updating user: {str(e)}")
+            logger.error(f"Error updating user: {str(e)}")
             raise
 
-    async def get_user(self, user_id: str) -> Optional[dict]:
+    async def get_user(self, user_id: str) -> Optional[Dict[str, Any]]:
         """Get user by ID"""
+        # Generate cache key
+        cache_key = self.cache.generate_key("user", user_id)
+        
+        # Try to get from cache
+        cached_user = await self.cache.get(cache_key)
+        if cached_user:
+            return cached_user
+
         try:
-            return await self.db.users.find_one({'_id': user_id})
+            user = await self.db.users.find_one({'_id': user_id})
+            
+            # Cache the result
+            if user:
+                await self.cache.set(cache_key, user)
+            
+            return user
         except Exception as e:
-            logging.error(f"Error getting user: {str(e)}")
+            logger.error(f"Error getting user: {str(e)}")
             raise
 
     async def get_user_by_voice_id(self, voice_id: str) -> Optional[dict]:
@@ -180,7 +228,7 @@ class MongoManager:
         try:
             return await self.db.users.find_one({'voice_id': voice_id})
         except Exception as e:
-            logging.error(f"Error getting user by voice ID: {str(e)}")
+            logger.error(f"Error getting user by voice ID: {str(e)}")
             raise
 
     async def add_relationship(self, user_id: str, related_user_id: str, 
@@ -203,7 +251,7 @@ class MongoManager:
             )
             return result.modified_count > 0
         except Exception as e:
-            logging.error(f"Error adding relationship: {str(e)}")
+            logger.error(f"Error adding relationship: {str(e)}")
             raise
 
     async def update_preferences(self, user_id: str, preferences: dict) -> bool:
@@ -220,7 +268,7 @@ class MongoManager:
             )
             return result.modified_count > 0
         except Exception as e:
-            logging.error(f"Error updating preferences: {str(e)}")
+            logger.error(f"Error updating preferences: {str(e)}")
             raise
 
     async def create_event(self, event_data: dict) -> str:
@@ -233,7 +281,7 @@ class MongoManager:
             result = await self.db.events.insert_one(event_data)
             return str(result.inserted_id)
         except Exception as e:
-            logging.error(f"Error creating event: {str(e)}")
+            logger.error(f"Error creating event: {str(e)}")
             raise
 
     async def track_preference_change(self, user_id: str, preference_type: str, old_value: dict, new_value: dict):
@@ -248,7 +296,7 @@ class MongoManager:
             }
             await self.db.preferences_history.insert_one(history_entry)
         except Exception as e:
-            logging.error(f"Error tracking preference change: {str(e)}")
+            logger.error(f"Error tracking preference change: {str(e)}")
             raise
 
     async def get_preference_history(self, user_id: str, preference_type: Optional[str] = None, 
@@ -263,7 +311,7 @@ class MongoManager:
             cursor.sort('timestamp', -1).limit(limit)
             return await cursor.to_list(length=limit)
         except Exception as e:
-            logging.error(f"Error getting preference history: {str(e)}")
+            logger.error(f"Error getting preference history: {str(e)}")
             raise
 
     async def suggest_connections(self, user_id: str, max_depth: int = 2, 
@@ -272,8 +320,8 @@ class MongoManager:
         try:
             user = await self.get_user(user_id)
             if not user or 'family_tree_id' not in user:
-                 logging.warning(f"User {user_id} not found or missing family_tree_id for connection suggestions.")
-                 return []
+                logger.warning(f"User {user_id} not found or missing family_tree_id for connection suggestions.")
+                return []
 
             family_id = user['family_tree_id']
 
@@ -335,7 +383,7 @@ class MongoManager:
             result = await self.db.users.aggregate(pipeline).to_list(length=None)
             return result
         except Exception as e:
-            logging.error(f"Error suggesting connections: {str(e)}")
+            logger.error(f"Error suggesting connections: {str(e)}")
             raise
 
     async def find_similar_voice_profiles(self, embedding_version: str, 
@@ -361,7 +409,7 @@ class MongoManager:
             result = await self.db.users.aggregate(pipeline).to_list(length=None)
             return result
         except Exception as e:
-            logging.error(f"Error finding similar voice profiles: {str(e)}")
+            logger.error(f"Error finding similar voice profiles: {str(e)}")
             raise
 
     async def delete_user(self, user_id: str) -> bool:
@@ -370,50 +418,90 @@ class MongoManager:
             result = await self.db.users.delete_one({'_id': user_id})
             return result.deleted_count > 0
         except Exception as e:
-            logging.error(f"Error deleting user: {str(e)}")
+            logger.error(f"Error deleting user: {str(e)}")
             raise
 
-    async def create_memory(self, memory_data: dict) -> str:
-        """Create a new memory with proper structure and linked family_tree_id"""
-        try:
-            # Ensure required fields
-            if 'content' not in memory_data or 'type' not in memory_data or 'created_by' not in memory_data:
-                raise ValueError("Memory must have content, type, and created_by fields")
+    async def create_memory(self, memory_data: Dict) -> str:
+        """Create a new memory"""
+        # Validate using schema
+        # self.validator.validate_memory(memory_data) # Uncomment and implement schema validation if needed
 
-            created_by_user_id = memory_data['created_by']
+        # Get the family_tree_id from the user who created the memory
+        created_by_user_id = memory_data.get('created_by')
+        if not created_by_user_id:
+            raise ValueError("Memory data must include 'created_by' user_id")
 
-            # Get the creator's family_tree_id
-            creator_user = await self.get_user(created_by_user_id)
-            if not creator_user or 'family_tree_id' not in creator_user:
-                # Handle case where creator user is not found or has no family_tree_id
-                # Depending on logic, you might raise an error or assign to a default/orphan family
-                logging.warning(f"Creator user {created_by_user_id} not found or missing family_tree_id. Cannot link memory to a family.")
-                # Optionally assign to a default/orphan family or handle differently
-                # memory_data['family_tree_id'] = 'orphan'
-                pass # Or raise an error if linking is mandatory
+        user = await self.get_user(created_by_user_id)
+        if not user or 'family_tree_id' not in user:
+            raise ValueError(f"User {created_by_user_id} not found or has no associated family_tree_id.")
+        memory_data['family_tree_id'] = user['family_tree_id']
+
+        # Assign a new ObjectId if not provided (e.g., for manually created memories)
+        if 'memory_id' not in memory_data:
+            memory_data['memory_id'] = str(ObjectId())
+            
+        # Ensure _id is set for MongoDB. If memory_id is provided, use it for _id.
+        memory_data['_id'] = memory_data.get('memory_id', str(ObjectId()))
+
+        # Ensure timestamps exist
+        if 'created_at' not in memory_data:
+            memory_data['created_at'] = datetime.utcnow()
+        if 'updated_at' not in memory_data:
+            memory_data['updated_at'] = datetime.utcnow()
+
+        # Set default visibility based on type (simplified)
+        if 'visibility' not in memory_data:
+            memory_data['visibility'] = 'family' if memory_data.get('type') == 'family' else 'private'
+
+        result = await self.db.memories.insert_one(memory_data)
+        logging.info(f"Memory created with ID: {result.inserted_id}")
+        return str(result.inserted_id)
+
+    async def get_memory(self, memory_id: str) -> Optional[Dict]:
+        """Get a memory by its ID"""
+        return await self.db.memories.find_one({'_id': memory_id})
+
+    async def search_memories(self, user_ids: List[str], query: str, family_ids: List[str], limit: int = 5) -> List[Dict]:
+        """Search memories using text index, prioritizing user's own, family, and shared memories"""
+        # TODO: Implement proper text search with scoring and prioritization
+        # This is a simplified placeholder using basic filtering
+        
+        # Build query filters
+        filters = []
+
+        # Filter by user_ids (memories created by or shared with these users)
+        # This requires a 'shared_with' field in memory documents
+        # For now, let's just filter by 'created_by'
+        if user_ids:
+            filters.append({'created_by': {'$in': user_ids}})
+            # TODO: Add logic for 'shared_with'
+
+        # Filter by family_ids (memories belonging to these families)
+        if family_ids:
+            filters.append({'family_tree_id': {'$in': family_ids}})
+
+        # Combine filters with OR for now - needs more sophisticated logic for relevance
+        combined_filter = {'$or': filters} if filters else {}
+        
+        # Add text search (assuming text index is on 'content')
+        if query:
+            # Ensure text index exists on the 'content' field of the 'memories' collection
+            # Example: db.collection('memories').create_index([('content', 'text')])
+            if combined_filter:
+                combined_filter['$text'] = {'$search': query}
             else:
-                memory_data['family_tree_id'] = creator_user['family_tree_id']
+                combined_filter = {'$text': {'$search': query}}
+                
+        logging.info(f"Searching memories with filter: {combined_filter}")
 
-            # Set default visibility based on type if not specified
-            if 'visibility' not in memory_data:
-                memory_data['visibility'] = {
-                    'type': 'family' if memory_data['type'] == 'family' else 'individual',
-                    'shared_with': [],
-                    'family_branch': None # This might be used later for sub-family sharing
-                }
-
-            # Add timestamps
-            memory_data.update({
-                'created_at': datetime.utcnow(),
-                'updated_at': datetime.utcnow()
-            })
-
-            result = await self.db.memories.insert_one(memory_data)
-            logging.info(f"Memory created with ID: {result.inserted_id} and family_tree_id: {memory_data.get('family_tree_id', 'N/A')}")
-            return str(result.inserted_id)
-        except Exception as e:
-            logging.error(f"Error creating memory: {str(e)}")
-            raise
+        # Execute query
+        # The cursor will return documents as dictionaries
+        cursor = self.db.memories.find(combined_filter).limit(limit)
+        memories = await cursor.to_list(length=limit) # Use to_list for async driver
+        
+        # TODO: Rerank results based on relevance (e.g., recency, user interaction, explicit links)
+        
+        return memories
 
     async def _update_family_tree_cache(self):
         """Update family tree cache with current relationships, organized by family_tree_id"""
@@ -462,7 +550,7 @@ class MongoManager:
         
         user = await self.get_user(user_id)
         if not user or 'family_tree_id' not in user:
-            return set() # User not found or no family_tree_id
+            return set()
 
         family_id = user['family_tree_id']
 
@@ -486,71 +574,18 @@ class MongoManager:
         
         return family_members
 
-    async def search_memories(self, user_ids: List[str], query: str, family_ids: List[str], limit: int = 5) -> list:
-        """Optimized memory search for multiple users across specified families"""
-        try:
-            if not user_ids and not family_ids:
-                logging.warning("search_memories called without user_ids or family_ids.")
-                return []
-
-            # Build query based on visibility rules and provided user/family IDs
-            visibility_query = {
-                '$or': [
-                    # Memories created by any of the specified users
-                    {'created_by': {'$in': user_ids}},
-                    # Family memories from any of the specified families
-                    {'family_tree_id': {'$in': family_ids}, 'type': 'family', 'visibility.type': 'family'},
-                     # Memories explicitly shared with any of the specified users
-                    {'visibility.shared_with': {'$in': user_ids}}
-                ]
-            }
-
-            # Add text search if query provided
-            if query:
-                # Combine text search with visibility using $and
-                final_query = {
-                    '$and': [
-                        visibility_query,
-                        {'$text': {'$search': query}}
-                    ]
-                }
-            else:
-                final_query = visibility_query # No text search, just visibility filters
-
-            # Use compound index for efficient querying
-            # Note: The text index is separate, MongoDB will combine search results.
-            cursor = self.db.memories.find(
-                final_query,
-                {'score': {'$meta': 'textScore'}} if query else {} # Include score only if text searching
-            )
-
-            # Sort by relevance (if text searching) and timestamp
-            sort_criteria = [('created_at', DESCENDING)]
-            if query:
-                sort_criteria.insert(0, ('score', {'$meta': 'textScore'}))
-
-            cursor.sort(sort_criteria).limit(limit)
-
-            return await cursor.to_list(length=limit)
-        except Exception as e:
-            logging.error(f"Error searching memories for users {user_ids} and families {family_ids}: {str(e)}")
-            # Consider a fallback if text search fails or handle differently
-            return []
-
     async def get_family_memories(self, family_ids: List[str], limit: int = 10) -> list:
         """Get recent family memories for specified families"""
         try:
             if not family_ids:
                 logging.warning("get_family_memories called without family_ids.")
                 return []
-
-            # Query family memories for the specified family IDs
+            # family_ids is a list of strings, so no attribute access issue here
             cursor = self.db.memories.find({
                 'family_tree_id': {'$in': family_ids},
                 'type': 'family',
                 'visibility.type': 'family'
             })
-            
             cursor.sort('created_at', DESCENDING).limit(limit)
             return await cursor.to_list(length=limit)
         except Exception as e:
@@ -575,6 +610,28 @@ class MongoManager:
             logging.error(f"Error sharing memory: {str(e)}")
             raise
 
+    async def create_family_tree(self, family_tree_data: Dict) -> str:
+        """Create a new family tree"""
+        try:
+            # Ensure family_tree_id is provided
+            if 'family_tree_id' not in family_tree_data or not family_tree_data['family_tree_id']:
+                raise ValueError("Family tree data must include 'family_tree_id'")
+
+            # Convert id to _id for MongoDB
+            if 'id' in family_tree_data:
+                family_tree_data['_id'] = family_tree_data.pop('id')
+
+            family_tree_data.update({
+                'created_at': datetime.utcnow(),
+                'updated_at': datetime.utcnow()
+            })
+            result = await self.db.family_trees.insert_one(family_tree_data)
+            logger.info(f"Family tree created with ID: {result.inserted_id}")
+            return str(result.inserted_id)
+        except Exception as e:
+            logger.error(f"Error creating family tree: {str(e)}")
+            raise
+
 # Create singleton instance
 _mongo_manager = None
 
@@ -582,6 +639,9 @@ async def get_mongo_manager() -> MongoManager:
     """Get or initialize singleton instance of MongoManager"""
     global _mongo_manager
     if _mongo_manager is None:
-        _mongo_manager = MongoManager()
-        await _mongo_manager.initialize() # Await initialization
+        # Get the CacheManager singleton
+        cache_manager = await get_cache_manager()
+        # Pass the cache_manager to the MongoManager constructor
+        _mongo_manager = MongoManager(cache_manager)
+        await _mongo_manager.initialize()
     return _mongo_manager 
