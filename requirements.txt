@@ -34,6 +34,4 @@ aiohttp==3.9.1
 pytest==7.4.3
 speechbrain==0.5.15
 
-# Google Cloud
-google-cloud-aiplatform>=1.36.0
-vertexai>=0.0.1 
+#

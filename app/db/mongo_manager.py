@@ -320,8 +320,8 @@ class MongoManager:
         try:
             user = await self.get_user(user_id)
             if not user or 'family_tree_id' not in user:
-                logger.warning(f"User {user_id} not found or missing family_tree_id for connection suggestions.")
-                return []
+                 logger.warning(f"User {user_id} not found or missing family_tree_id for connection suggestions.")
+                 return []
 
             family_id = user['family_tree_id']
 

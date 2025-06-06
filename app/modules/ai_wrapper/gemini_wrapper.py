@@ -5,6 +5,9 @@ import vertexai
 from vertexai.preview.generative_models import GenerativeModel, ChatSession, GenerationResponse, FunctionDeclaration, Tool, Part
 from app.core.config import settings
 import json
+from .tool_handler import ToolHandler
+from .reflection_manager import get_reflection_manager
+from app.services.unified_service import get_unified_service
 
 # Attempt to load environment variables from .env file
 # Note: This should be done at the application entry point, but included here
@@ -19,7 +22,7 @@ import json
 # Initialize Vertex AI
 # Use the hardcoded values for project and location during this debugging phase
 # Revert to using settings after the credential issue is resolved
-vertexai.init(project=settings.GOOGLE_CLOUD_PROJECT, location=settings.GOOGLE_CLOUD_LOCATION)
+# vertexai.init(project=settings.GOOGLE_CLOUD_PROJECT, location=settings.GOOGLE_CLOUD_LOCATION)
 # vertexai.init(project=settings.GOOGLE_CLOUD_PROJECT, location=settings.GOOGLE_CLOUD_LOCATION, credentials_file=CREDENTIALS_FILE_PATH)
 
 logger = logging.getLogger(__name__)
@@ -64,211 +67,317 @@ search_memories_tool = FunctionDeclaration(
     },
 )
 
-# Combine with existing tools like web search
-all_tools = [get_user_preference_tool, search_memories_tool]
+# Define web search tool with proper configuration
+web_search_tool = FunctionDeclaration(
+    name="web_search",
+    description="Search the web for real-time information. Use this when you need current information or facts that might not be in your training data.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The search query to look up on the web."
+            },
+            "num_results": {
+                "type": "integer",
+                "description": "Number of results to return (default: 3)",
+                "default": 3
+            }
+        },
+        "required": ["query"]
+    }
+)
+
+# Define navigation assistance tool
+navigation_assistance_tool = FunctionDeclaration(
+    name="navigation_assistance",
+    description="Get enhanced navigation directions with AI-powered natural language guidance and offline capabilities.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "origin": {
+                "type": "string",
+                "description": "Starting location (address or coordinates)"
+            },
+            "destination": {
+                "type": "string", 
+                "description": "Destination location (address or coordinates)"
+            },
+            "request_type": {
+                "type": "string",
+                "description": "Type of navigation assistance needed",
+                "enum": ["directions", "offline_guidance", "quick_clarification"]
+            },
+            "current_location": {
+                "type": "object",
+                "description": "Current GPS coordinates for offline guidance",
+                "properties": {
+                    "lat": {"type": "number"},
+                    "lng": {"type": "number"}
+                }
+            },
+            "need_type": {
+                "type": "string",
+                "description": "Type of assistance needed for offline guidance",
+                "enum": ["emergency", "fuel", "accommodation", "supplies", "general"]
+            }
+        },
+        "required": ["request_type"]
+    }
+)
+
+# Combine all tools
+all_tools = [get_user_preference_tool, search_memories_tool, web_search_tool, navigation_assistance_tool]
 
 class GeminiWrapper:
-    def __init__(self):
-        """Initialize Gemini wrapper with Vertex AI and tools"""
+    def __init__(self, api_key: str, project_id: str, location: str):
+        self.api_key = api_key
+        self.project_id = project_id
+        self.location = location
+        self.model = None
+        self.chat_session = None
+        self.tool_handler = None
+        
+        # Define web search tool with proper configuration
+        web_search_tool = FunctionDeclaration(
+            name="web_search",
+            description="Search the web for real-time information. Use this when you need current information or facts that might not be in your training data.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query to look up on the web."
+                    },
+                    "num_results": {
+                        "type": "integer",
+                        "description": "Number of results to return (default: 3)",
+                        "default": 3
+                    }
+                },
+                "required": ["query"]
+            }
+        )
+        
+        # Combine all tools
+        self.tools = [get_user_preference_tool, search_memories_tool, web_search_tool, navigation_assistance_tool]
+        
         try:
-            # Define the system instruction/prompt for the AI's role
-            self.system_instruction = """You are an in-car AI assistant named 'Queen'.\n"\
-                                      "Your primary goal is to assist the driver and passengers safely and effectively.\n"\
-                                      "Focus on providing relevant information, controlling car features, and engaging in helpful conversation.\n"\
-                                      "Prioritize driver safety at all times. Avoid distracting the driver during critical maneuvers.\n"\
-                                      "Be polite, friendly, and concise. Use information about the user and their preferences when available to personalize responses.\n"\
-                                      "Incorporate a slightly funny and quirky tone in your responses, but remain helpful and professional.\n" \
-                                      "Pay attention to the user's mood. If the user seems low, sad, or distressed, respond with empathy and try to be comforting like a supportive friend, while still maintaining your assistant role.\n" \
-                                      "You can access user preferences, recent interactions, and potentially other context provided to you.\n"\
-                                      "If a request seems unsafe or distracting, politely decline and remind the user about safety.\n"\
-                                      "---\n"\
-                                      "---Context & Tool Usage---\n"\
-                                      "Before deciding to use a tool, FIRST check the provided CONTEXT section for the information you need. If the information is present in the CONTEXT, use it directly.\n"\
-                                      "If the information is NOT in the CONTEXT and the user is asking for their preferences or memories, YOU MUST use the appropriate tool (get_user_preference or search_memories) to retrieve the information. Do not answer based on general knowledge or admit you don't have the information without attempting to use the tool first.\n"\
-                                      "You have access to tools to help you, especially for finding up-to-date information and recalling user-specific details.\n"\
-                                      "When the user asks for information you don't have readily available, use the appropriate tool (e.g., get_user_preference, search_memories, web_search) to retrieve it.\n"\
-                                      "Once you have the information from the tool, use it to formulate your response.\n"\
-                                      """
+            # Initialize Vertex AI
+            vertexai.init(project=self.project_id, location=self.location)
             
-            # Define available tools (using the combined list)
-            self.tools = [Tool(function_declarations=all_tools)]
+            # Define the system instruction/prompt for the AI's role
+            self.system_instruction = """You are Queen, an advanced in-car AI assistant with meta-cognitive reasoning capabilities.
+
+IDENTITY: You are Queen (not the user). Your mission: provide safe, intelligent assistance to drivers/passengers.
+
+THINKING MODES:
+- CONVERGENT: For focused solutions, summaries, decisions (use when precision needed)
+- DIVERGENT: For brainstorming, creative options, exploration (use when variety needed)  
+- CHAIN-OF-THOUGHT: For complex problems, think step-by-step before answering
+
+CORE WORKFLOW:
+1. ANALYZE: User intent, context, safety implications
+2. MODE SELECT: Choose convergent/divergent/CoT based on request type
+3. EXECUTE: Generate response using selected thinking mode
+4. VALIDATE: Check output quality, safety, helpfulness
+
+SAFETY PROTOCOL:
+- Driver safety = absolute priority
+- If unsafe during driving: "I'll help when you're safely stopped"
+- Adapt complexity to driving context (brief while moving, detailed when parked)
+
+OUTPUT STRUCTURE:
+```
+[Brief acknowledgment]
+[Main response using selected thinking mode]
+[Optional: Follow-up question if clarification needed]
+```
+
+PERSONALITY: Authentically helpful with intelligent wit. Learn from each interaction.
+
+CONTEXT PRIORITY: Check provided CONTEXT first → use tools only if information missing.
+
+SELF-IMPROVEMENT: After complex interactions, internally note: "What worked? How can I improve?" Apply learnings to future responses."""
 
             # Initialize the model with tools and system instruction
-            self.model = GenerativeModel(settings.GEMINI_MODEL_NAME, tools=self.tools, system_instruction=self.system_instruction)
-            
-            # Start chat
-            self.chat: ChatSession = self.model.start_chat(
-                # System instruction and tools are now passed during model initialization
-                # tools=self.tools # Ensure tools are included on start_chat as well
+            self.model = GenerativeModel(
+                settings.GEMINI_MODEL_NAME,
+                tools=[Tool(function_declarations=self.tools)],
+                system_instruction=self.system_instruction,
+                generation_config={
+                    "temperature": settings.GEMINI_TEMPERATURE,
+                    "max_output_tokens": settings.GEMINI_MAX_OUTPUT_TOKENS,
+                    "top_p": 0.8,
+                    "top_k": 40
+                }
             )
+            
+            # Start chat session
+            self.chat_session: ChatSession = self.model.start_chat()
             
             logger.info("Successfully initialized Gemini wrapper with system instruction and tools")
         except Exception as e:
             logger.error(f"Failed to initialize Gemini wrapper: {str(e)}")
             raise
 
-    async def generate_response(
-        self,
-        user_id: str,
-        user_input: str,
-        context: Optional[Dict[str, Any]] = None,
-        tool_results: Optional[List[Dict[str, Any]]] = None # Add parameter for tool results
-    ) -> Union[str, List[Dict[str, Any]]]:
-        """
-        Generate a response using Gemini model, potentially incorporating tool results.
-        
-        Args:
-            user_id: The ID of the user.
-            user_input: The user's input text (or the original input if responding to tool results).
-            context: Optional context dictionary.
-            tool_results: Optional list of results from previous tool calls.
-        
-        Returns:
-            Union[str, List[Dict[str, Any]]]: The generated text response or a list of tool calls.
-        """
-        try:
-            # Prepare the content to send to the chat session
-            content_parts: List[Union[str, Part]] = []
-            
-            if tool_results:
-                # If responding to tool results, send them as FunctionResponse Parts
-                logger.info(f"Sending tool results to Gemini: {tool_results}")
-                for result in tool_results:
-                    content_parts.append(Part.from_function_response(
-                        name=result["name"],
-                        response={
-                            "content": result["content"]
-                            # Include other relevant fields from the tool result if needed
-                        }
-                    ))
-                # If tool results are provided, the user_input here is likely the original query
-                # that led to the tool call, so we might need to add it back for context.
-                # Or, the calling logic should manage the history.
-                # For now, let's assume the calling logic ensures the chat history is maintained
-                # and just send the tool results. If a new turn, the user_input will be handled below.
-            
-            # Add user input (only if not primarily sending tool results, or if it's a new turn)
-            # This logic might need refinement based on how chat history is managed.
-            # For this implementation, we assume user_input is the primary input for a new turn.
-            if user_input and not tool_results:
-                 content_parts.append(user_input)
+    async def initialize(self):
+        """Asynchronously initialize dependencies like ToolHandler"""
+        if self.tool_handler is None:
+            unified_service = await get_unified_service()
+            self.tool_handler = ToolHandler(unified_service=unified_service)
+            logger.info("ToolHandler initialized.")
 
-            # Add additional context if provided (can be sent alongside user input or tool results)
-            if context:
-                context_str = "Context:\n"
-                for key, value in context.items():
-                    context_str += f"{key}: {json.dumps(value, indent=2)}\n"
-                content_parts.append(context_str)
+    async def generate_response(self, user_input: str, context: Dict[str, Any] = None) -> Union[str, List[Dict[str, Any]]]:
+        """Generate a response from the AI model, handling tool calls"""
+        if not self.chat_session:
+            raise RuntimeError("Chat session not initialized. Call initialize() first.")
 
-            if not content_parts:
-                 logger.warning("No content parts to send to Gemini.")
-                 return "An internal error occurred: No content to send to AI."
-
-            # Send content to the chat session
-            response: GenerationResponse = await self.chat.send_message_async(content_parts)
-            
-            # Process and return the response - check for tool calls or text
-            if response.candidates and response.candidates[0].content.parts:
-                tool_calls = []
-                text_response_parts = []
-                for part in response.candidates[0].content.parts:
-                    if hasattr(part, 'function_call') and part.function_call:
-                        # Ensure function call args are serializable
-                        args_dict = {}
-                        if hasattr(part.function_call, 'args') and part.function_call.args:
-                            for arg_name, arg_value in part.function_call.args.items():
-                                try:
-                                    args_dict[arg_name] = json.loads(json.dumps(arg_value)) # Ensure JSON serializable
-                                except (TypeError, json.JSONDecodeError):
-                                    logger.warning(f"Argument {arg_name} is not JSON serializable: {arg_value}")
-                                    args_dict[arg_name] = str(arg_value) # Fallback to string
-
-                        tool_calls.append({
-                            "name": part.function_call.name,
-                            "args": args_dict
-                        })
-                    if hasattr(part, 'text') and part.text:
-                        text_response_parts.append(part.text)
-                
-                if tool_calls:
-                    # Return tool calls if any are present
-                    logger.info(f"Gemini requested tool calls: {tool_calls}")
-                    # Note: Returning the list of tool calls for the caller to execute
-                    return tool_calls
-                elif text_response_parts:
-                    # Join text parts if only text is present
-                    text = " ".join(text_response_parts)
-                    logger.info(f"Received Gemini text response (first 50 chars): {text[:50]}...")
-                    return text.strip()
-                else:
-                     logger.warning("Gemini response contains parts but no text or function_call.")
-                     return "I received a response but couldn't understand it."
-            else:
-                # Handle cases where there are no candidates or parts (e.g., safety blocks)
-                logger.warning(f"Gemini response has no candidates or parts: {response}")
-                feedback = getattr(response, 'prompt_feedback', None)
-                if feedback and feedback.block_reason:
-                     logger.warning(f"Response blocked: {feedback.block_reason}")
-                     return "I'm sorry, I can't respond to that request due to safety concerns."
-                elif feedback and feedback.safety_ratings:
-                     logger.warning(f"Response flagged by safety ratings: {feedback.safety_ratings}")
-                     return "I'm sorry, I can't respond to that request."
-                else:
-                    return "I apologize, but I couldn't generate a response."
-            
-        except Exception as e:
-            logger.error(f"Error generating response: {str(e)}")
-            error_detail = str(e)
-            return f"I apologize, but I'm having trouble processing your request right now. Details: {error_detail}"
-
-    def _prepare_prompt(self, user_input: str, context: Optional[Dict[str, Any]] = None) -> str:
-        """
-        Prepare the prompt with context (deprecated for primary use).
-        Note: This is now primarily for formatting context if needed outside generate_response.
-        """
-        logger.warning("_prepare_prompt method is primarily for formatting context in generate_response now.")
-        formatted_context = ""
+        # Prepare the input for the model, including context
+        input_parts = [Part.from_text(user_input)]
         if context:
-             formatted_context += "Context:\n"
-             for key, value in context.items():
-                 formatted_context += f"{key}: {json.dumps(value, indent=2)}\n"
-        
-        return f"User Input: {user_input}\n\n{formatted_context.strip()}"
+            # Ensure context is formatted as a string within the prompt for the model to see
+            formatted_context = json.dumps(context, indent=2)
+            input_parts.append(Part.from_text(f"\n\nContext:\n{formatted_context}"))
 
-    def _process_response(self, response: GenerationResponse) -> str:
-        """
-        Process and clean the model's text response.
-        Note: This method is now only for processing text responses after checking for tool calls.
-        """
+        response = None
+
         try:
-            text_parts = [part.text for part in response.candidates[0].content.parts if hasattr(part, 'text')]
-            text = " ".join(text_parts)
+            # send_message is not an async method, so we don't await it
+            response = self.chat_session.send_message(input_parts)
 
-            # Basic cleaning
-            text = text.strip()
+            # Check if the response contains function calls by examining the response structure
+            function_calls = []
+            text_content = ""
             
-            return text
-        except Exception as e:
-            logger.error(f"Error processing text response parts: {str(e)}")
-            response_text_fallback = getattr(response, 'text', str(response))
-            return f"I apologize, but I'm having trouble processing the response text. Details: {response_text_fallback}"
+            if hasattr(response, 'candidates') and response.candidates:
+                candidate = response.candidates[0]
+                if hasattr(candidate, 'content') and candidate.content:
+                    for part in candidate.content.parts:
+                        if hasattr(part, 'function_call') and part.function_call:
+                            function_calls.append({
+                                "name": part.function_call.name,
+                                "args": dict(part.function_call.args)
+                            })
+                        elif hasattr(part, 'text') and part.text:
+                            text_content += part.text
 
-    async def reset_chat(self):
-        """Reset the chat session"""
-        try:
-            # Restart chat, system instruction and tools are on the model
-            self.chat = self.model.start_chat()
-            logger.info("Chat session reset successfully with system instruction and tools")
+            # If there are function calls, return them for processing (prioritize function calls)
+            if function_calls:
+                return function_calls
+
+            # If no function calls but we have text content, return it
+            if text_content:
+                return text_content
+
+            # Fallback to the standard response.text method
+            return response.text
         except Exception as e:
-            logger.error(f"Error resetting chat session: {str(e)}")
-            raise
+            logger.error(f"Error during generate_response: {type(e).__name__}: {str(e)}")
+            return f"An error occurred while processing your request: {str(e)}"
+
+    async def chat(self, user_id: str, user_input: str, context: Dict[str, Any] = None) -> str:
+        """Handle a complete chat turn with self-reflection and improvement"""
+        # Ensure context includes user_id for tool handler if needed
+        if context is None:
+            context = {}
+        if "user_id" not in context:
+             context["user_id"] = user_id # Add user_id to context if not present
+
+        # Get reflection manager for self-improvement
+        reflection_manager = get_reflection_manager()
+        
+        # Pre-response reflection
+        reflection_context = await reflection_manager.pre_response_reflection(user_input, context)
+        
+        # Enhance context with reflection insights
+        enhanced_context = {**context, "reflection_insights": reflection_context}
+
+        # Generate response with enhanced context
+        ai_response = await self.generate_response(user_input, enhanced_context)
+
+        # Check if the AI requested tool calls
+        # generate_response now returns a list of dicts for tool calls, or a string for text.
+        if isinstance(ai_response, list) and ai_response and 'name' in ai_response[0] and 'args' in ai_response[0]:
+            # This structure indicates tool calls returned by generate_response
+            logger.info(f"AI requested tool calls: {ai_response}")
+            tool_response_parts = []
+            
+            for tool_call in ai_response:
+                if self.tool_handler is None:
+                    logger.error("ToolHandler not initialized.")
+                    continue
+
+                tool_name = tool_call.get('name')
+                tool_args = tool_call.get('args', {})
+
+                try:
+                    # Execute the tool call (await since execute_tool is async)
+                    result_content = await self.tool_handler.execute_tool(
+                        tool_name=tool_name,
+                        tool_args=tool_args
+                    )
+                    
+                    # Create function response part for sending back to the model
+                    tool_response_parts.append(Part.from_function_response(
+                        name=tool_name,
+                        response=result_content  # Send the structured result directly
+                    ))
+                    
+                except Exception as e:
+                    logger.error(f"Error executing tool {tool_name}: {str(e)}")
+                    # Send error response back to model
+                    tool_response_parts.append(Part.from_function_response(
+                        name=tool_name,
+                        response={"error": str(e)}
+                    ))
+
+            # Send tool results back to the model for a final response
+            if tool_response_parts:
+                try:
+                    final_ai_response = self.chat_session.send_message(tool_response_parts)
+                    final_text_response = final_ai_response.text
+                    
+                    # Post-response reflection for continuous learning
+                    await reflection_manager.post_response_reflection(
+                        user_input, final_text_response
+                    )
+                    
+                    return final_text_response
+                except Exception as e:
+                    logger.error(f"Error sending tool results back to model: {str(e)}")
+                    return "I executed the tool but had trouble processing the results. Please try again."
+            else:
+                logger.error("Tool calls were indicated, but no results were obtained after execution attempt.")
+                return "An internal error occurred during tool execution."
+
+        elif isinstance(ai_response, str):
+            # Post-response reflection for direct text responses
+            await reflection_manager.post_response_reflection(
+                user_input, ai_response
+            )
+            
+            # If the initial response was text, just return it
+            return ai_response
+        else:
+             # Handle unexpected response types from initial generate_response call
+             logger.error(f"Received unexpected response type from generate_response: {type(ai_response)}")
+             return "An unexpected error occurred after generating initial response."
 
 # Singleton instance
-_gemini_wrapper = None
+_gemini_wrapper: Optional[GeminiWrapper] = None
 
 async def get_gemini_wrapper() -> GeminiWrapper:
-    """Get singleton instance of GeminiWrapper"""
+    """Get singleton instance of GeminiWrapper, initializing if necessary"""
     global _gemini_wrapper
     if _gemini_wrapper is None:
-        _gemini_wrapper = GeminiWrapper()
+        # Ensure settings are loaded (should be done at app startup)
+        # from app.core.config import settings # Already imported at top
+        
+        _gemini_wrapper = GeminiWrapper(
+            api_key=settings.GOOGLE_APPLICATION_CREDENTIALS, # Assuming this is the path to your credentials file
+            project_id=settings.GOOGLE_CLOUD_PROJECT,
+            location=settings.GOOGLE_CLOUD_LOCATION
+        )
+        await _gemini_wrapper.initialize() # Initialize tool handler and other async components
     return _gemini_wrapper 

@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     GEMINI_MAX_OUTPUT_TOKENS: int = 1024
     GEMINI_TEMPERATURE: float = 0.7
     
+    # Google Search API Settings
+    GOOGLE_SEARCH_API_KEY: str = os.getenv("GOOGLE_SEARCH_API_KEY", "")
+    GOOGLE_SEARCH_ENGINE_ID: str = os.getenv("GOOGLE_SEARCH_ENGINE_ID", "")
+    
+    # Google Maps API Settings
+    GOOGLE_MAPS_API_KEY: str = os.getenv("GOOGLE_MAPS_API_KEY", "")
+    
     class Config:
         case_sensitive = True
         env_file = ".env"

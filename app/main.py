@@ -7,6 +7,8 @@ from app.modules.memory.api import router as memory_router
 from app.modules.mcp.api import router as mcp_router
 from app.modules.maps.api import router as maps_router
 from app.modules.context.api import router as context_router
+from app.api.reflection import router as reflection_router
+from app.api.navigation import router as navigation_router
 from app.modules.voice_layer.voice_processor import get_voice_processor
 from app.modules.user_info.user_graph import get_user_graph
 from app.modules.memory.memory_store import get_memory_store
@@ -67,6 +69,8 @@ app.include_router(memory_router, prefix="/api/v1/memory", tags=["memory"])
 app.include_router(mcp_router, prefix="/api/v1/mcp", tags=["mcp"])
 app.include_router(maps_router, prefix="/api/v1/maps", tags=["maps"])
 app.include_router(context_router, prefix="/api/v1/context", tags=["context"])
+app.include_router(reflection_router, prefix="/api/v1", tags=["reflection"])
+app.include_router(navigation_router, prefix="/api/v1", tags=["navigation"])
 
 @app.on_event("shutdown")
 async def shutdown_event():
