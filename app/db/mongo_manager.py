@@ -1,6 +1,5 @@
 import os
 import sys
-print(f"Loading mongo_manager.py from: {__file__}") # Print file path
 
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import MongoClient, IndexModel, ASCENDING, DESCENDING
