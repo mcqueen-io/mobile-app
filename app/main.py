@@ -82,3 +82,8 @@ async def shutdown_event():
     # Close MCP client session
     mcp_client = get_mcp_client()
     await mcp_client.close() 
+    
+    # Cleanup ChromaDB resources
+    from app.db.chroma_manager import get_chroma_manager
+    chroma_manager = get_chroma_manager()
+    chroma_manager.cleanup() 
