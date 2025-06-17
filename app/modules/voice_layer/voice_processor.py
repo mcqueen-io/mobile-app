@@ -1,43 +1,24 @@
-import asyncio
 import json
-from app.core.config import settings
 import numpy as np
 import torch
-import torchaudio
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 import sounddevice as sd
 import wave
 import os
-from pathlib import Path
 import librosa
-import queue
-import threading
-import time
 import tempfile
 from speechbrain.pretrained import EncoderClassifier
 import webrtcvad
-import collections
 import logging
-from app.modules.ai_wrapper.gemini_wrapper import get_gemini_wrapper, GeminiWrapper
+from app.modules.ai_wrapper.gemini_wrapper import get_gemini_wrapper
 from app.db.chroma_manager import get_chroma_manager, ChromaManager
 from app.services.unified_service import get_unified_service, UnifiedService
-from deepgram import Deepgram
 from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
 
 class VoiceProcessor:
     def __init__(self, unified_service: UnifiedService):
-        self.deepgram = None
-        if hasattr(settings, 'DEEPGRAM_API_KEY') and settings.DEEPGRAM_API_KEY:
-            try:
-                self.deepgram = Deepgram(settings.DEEPGRAM_API_KEY)
-                logger.info("Deepgram client initialized successfully.")
-            except Exception as e:
-                logger.error(f"Warning: Could not initialize Deepgram: {e}")
-        else:
-            logger.warning("Warning: Deepgram API key not found. Deepgram features will be disabled.")
-        
         self.websocket: Optional[WebSocket] = None
         self.voice_encoder = None
         self.vad = None
@@ -47,12 +28,11 @@ class VoiceProcessor:
         self.chunk_duration = 0.03  # 30ms chunks for VAD
         self.embedding_size = 192  # ECAPA-TDNN embedding size
         
-        # Assign dependencies
         self.unified_service = unified_service
         
         # Initialize voice encoder and VAD
         self._initialize_voice_models()
-        
+
         # List available audio devices
         self._list_audio_devices()
         
@@ -282,13 +262,13 @@ class VoiceProcessor:
             logger.error(f"Error registering speaker {name} in ChromaDB: {str(e)}")
             return False
 
-    def identify_speaker(self, embedding: np.ndarray, threshold: float = 0.7) -> Optional[str]:
+    def identify_speaker(self, embedding: np.ndarray, threshold: float = 0.5) -> Optional[str]:
         """
         Identify a speaker by querying similar embeddings in ChromaDB.
         
         Args:
             embedding: The voice embedding to identify.
-            threshold: Similarity threshold for identification.
+            threshold: Cosine distance threshold for identification (lower is better, typical range 0-2).
         
         Returns:
             Optional[str]: The name/ID of the identified speaker (or None if no match above threshold).
@@ -300,6 +280,7 @@ class VoiceProcessor:
                 query_embedding=embedding.tolist(), # Convert numpy array to list
                 n_results=1 # Get the single most similar result
             )
+            print("results: ", results)
             
             logger.debug(f"ChromaDB query results: {results}")
 
@@ -307,20 +288,24 @@ class VoiceProcessor:
                 # Get the most similar result
                 most_similar_id = results['ids'][0][0]
                 distance = results['distances'][0][0]
+                print("distance: ", distance)
                 metadata = results['metadatas'][0][0]
+                print("metadata: ", metadata)
                 
-                # ChromaDB returns distance (lower is better). Need to check if it's within a similarity threshold.
-                # The interpretation of distance depends on the embedding model and distance function used by ChromaDB.
-                # For now, we'll assume a distance threshold works, but this might need calibration.
-                # A lower distance means higher similarity.
+                # ChromaDB returns cosine distance (lower is better, range 0-2)
+                # For cosine distance: 0 = identical, 1 = orthogonal, 2 = opposite
+                # Typical good match threshold: 0.3-0.7 depending on voice quality
                 
-                # NOTE: The 'threshold' here is applied to distance, not similarity. Lower distance < threshold is a good match.
+                logger.info(f"Voice similarity check: distance={distance:.4f}, threshold={threshold}")
+                
                 if distance is not None and distance < threshold:
                     identified_speaker_name = metadata.get("speaker_name")
-                    logger.info(f"Identified speaker {identified_speaker_name} with distance {distance} (ID: {most_similar_id})")
+                    logger.info(f"Identified speaker {identified_speaker_name} with cosine distance {distance:.4f} (ID: {most_similar_id})")
+                    print("identified_speaker_name: ", identified_speaker_name)
                     return identified_speaker_name # TODO: Return MongoDB user_id here
                 else:
-                    logger.info(f"No speaker identified above threshold {threshold} (closest distance: {distance})")
+                    logger.info(f"No speaker identified above threshold {threshold} (closest cosine distance: {distance:.4f})")
+                    print(f"Speaker not identified: distance {distance:.4f} > threshold {threshold}")
                     return None
             else:
                 logger.info("No results from ChromaDB query")
@@ -332,33 +317,6 @@ class VoiceProcessor:
 
     def set_websocket(self, websocket: WebSocket):
         self.websocket = websocket
-
-    async def start_stream(self, callback):
-        """Start a WebSocket stream with Deepgram for real-time transcription"""
-        if not self.deepgram:
-            print("Deepgram is not initialized. Streaming is unavailable.")
-            return None
-        try:
-            self.websocket = await self.deepgram.transcription.live({
-                'punctuate': True,
-                'interim_results': False,
-                'language': 'en-US',
-                'model': 'nova',
-                'diarize': True
-            })
-
-            # Register handler for transcript messages
-            self.websocket.registerHandler(
-                self.websocket.event.TRANSCRIPT_RECEIVED,
-                lambda data: asyncio.create_task(self._process_transcript(json.loads(data)))
-            )
-
-            logger.info("Deepgram WebSocket stream started")
-            return self.websocket
-
-        except Exception as e:
-            logger.error(f"Error starting Deepgram stream: {str(e)}")
-            return None
 
     async def _process_transcript(self, data: Dict):
         """
