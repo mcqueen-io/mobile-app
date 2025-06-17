@@ -1,17 +1,14 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException
 from app.modules.voice_layer.voice_processor import get_voice_processor, VoiceProcessor
-from app.modules.ai_wrapper.gemini_wrapper import get_gemini_wrapper, GeminiWrapper
-from app.services.user_service import UserService, get_user_service
-from app.services.context_service import ContextService, get_context_service
-import json
+from app.modules.voice_layer.deepgram import get_deepgram_transcriber
 import numpy as np
 import wave
 import io
 import logging
-from typing import Optional, Deque
+import time
+from typing import Optional, Deque, Dict, Any
 from collections import deque
 import asyncio
-import time
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -28,12 +25,7 @@ async def get_async_voice_processor() -> VoiceProcessor:
     """Async getter for VoiceProcessor"""
     global voice_processor
     if voice_processor is None:
-        # Ensure dependencies are available before initializing VoiceProcessor
-        gemini_wrapper = await get_gemini_wrapper()
-        user_service = await get_user_service()
-        context_service = await get_context_service()
-        # Pass all dependencies to get_voice_processor
-        voice_processor = await get_voice_processor(gemini_wrapper, user_service, context_service) 
+        voice_processor = await get_voice_processor() 
     return voice_processor
 
 class AudioBuffer:
@@ -241,20 +233,25 @@ async def identify_speaker(
             )
         
         # Identify the speaker
-        identified_user_id = processor.identify_speaker(embedding)
+        identified_user_id = processor.identify_speaker(embedding, 0.4)  # Lower threshold for cosine distance
+        print("identified_user_id: ", identified_user_id)
         
         if identified_user_id:
-            # Get UserService instance
-            user_service = await get_user_service() # Use async getter
             
             # Fetch user details from MongoDB
-            user = await user_service.get_user(identified_user_id)
+            # TODO: Uncomment this when we have a way to get user details from MongoDB
+            # user = await user_service.get_user(identified_user_id)
+
+            user = identified_user_id
             
             if user:
-                logger.info(f"Identified user {user.username} (ID: {identified_user_id})")
+                # TODO: Uncomment this when we have a way to get user details from MongoDB
+                # logger.info(f"Identified user {user.username} (ID: {identified_user_id})")
                 return {
                     "status": "success",
-                    "identified_user": user.model_dump(), # Return user model (Pydantic v2)
+                    # TODO: Uncomment this when we have a way to get user details from MongoDB
+                    #"identified_user": user.model_dump(), # Return user model (Pydantic v2)
+                    "identified_user": user,
                     "details": {
                         "embedding_shape": embedding.shape,
                         "sample_rate": frame_rate,
@@ -287,6 +284,7 @@ async def identify_speaker(
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    voice_processor = get_voice_processor()
     
     # Get voice processor instance and set the websocket
     voice_processor = await get_async_voice_processor()
@@ -309,6 +307,19 @@ async def websocket_endpoint(websocket: WebSocket):
              return
 
         # Handle incoming audio data from the WebSocket client
+        # Start Deepgram Voice Agent stream
+        async def handle_voice_agent_response(data):
+            try:
+                # Forward the response to the client
+                await websocket.send_json(data)
+            except WebSocketDisconnect:
+                logger.info("Client disconnected while sending response")
+            except Exception as e:
+                logger.error(f"Error sending response to client: {e}")
+        
+        stream = await voice_processor.start_voice_agent_stream(handle_voice_agent_response)
+        
+        # Handle incoming audio data
         while True:
             try:
                 data = await websocket.receive_bytes()
@@ -354,3 +365,88 @@ async def websocket_endpoint(websocket: WebSocket):
         if deepgram_stream:
              await voice_processor.stop_stream()
         await websocket.close() 
+
+@router.websocket("/ws/stream")
+async def websocket_transcribe(websocket: WebSocket, provider: str = "deepgram"):
+    """
+    WebSocket endpoint for real-time audio transcription with diarization.
+    Accepts audio data in chunks and returns transcription results.
+    
+    Query Parameters:
+        provider: Transcription provider to use ("deepgram" or "google")
+    """
+    transcriber = None
+    websocket_active = True
+    
+    try:
+        await websocket.accept()
+        logger.info(f"WebSocket connection accepted for transcription with provider: {provider}")
+
+        # Generate a unique session ID
+        session_id = f"session_{int(time.time())}_{id(websocket)}"
+        logger.info(f"Created new session: {session_id}")
+
+        # Initialize transcriber based on provider
+        from app.modules.voice_layer.transcriber_factory import get_transcriber
+        transcriber = await get_transcriber(provider)
+        logger.info(f"{provider.capitalize()} transcriber initialized")
+        
+        # Callback function to handle transcription results
+        async def handle_transcript(transcript_data: Dict[str, Any]):
+            nonlocal websocket_active
+            if not websocket_active:
+                return
+            
+            try:
+                await websocket.send_json(transcript_data)
+            except WebSocketDisconnect:
+                logger.info("Client disconnected while sending response")
+                websocket_active = False
+            except Exception as e:
+                logger.error(f"Error sending transcript to client: {str(e)}")
+                websocket_active = False
+
+        # Start transcription with session_id
+        success = await transcriber.start_transcription(handle_transcript, session_id)
+        if not success:
+            logger.error("Failed to start transcription")
+            return
+
+        try:
+            while websocket_active:
+                # Receive audio data from client
+                audio_data = await websocket.receive_bytes()
+                
+                # Send audio data to Deepgram
+                await transcriber.send_audio(audio_data)
+                
+        except WebSocketDisconnect:
+            logger.info("WebSocket disconnected normally")
+            websocket_active = False
+        except Exception as e:
+            logger.error(f"Error in transcription websocket: {str(e)}")
+            websocket_active = False
+            try:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": f"Error in transcription: {str(e)}"
+                })
+            except:
+                # If we can't send the error message, the connection is likely already closed
+                logger.info("Could not send error message, connection likely closed")
+
+    except Exception as e:
+        logger.error(f"Error in transcription websocket: {str(e)}")
+        websocket_active = False
+    finally:
+        # Mark connection as inactive first
+        websocket_active = False
+        
+        # Clean up resources
+        if transcriber:
+            try:
+                await transcriber.stop_transcription()
+            except Exception as e:
+                logger.error(f"Error stopping transcription: {str(e)}")
+        
+        logger.info("WebSocket endpoint cleanup completed") 
