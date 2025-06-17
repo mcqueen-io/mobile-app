@@ -6,6 +6,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Settings(BaseSettings):
+    # General Settings
+    DEBUG: bool = os.getenv("DEBUG", "False").lower() == "true"
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    
     # API Settings
     API_V1_STR: str = "/api/v1"
     PROJECT_NAME: str = "In-Car AI Assistant"
