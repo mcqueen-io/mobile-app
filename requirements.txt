@@ -28,6 +28,9 @@ scipy==1.11.4
 scikit-learn==1.3.2
 PyAudio==0.2.14
 
+# Google Cloud Speech-to-Text Dependencies
+google-cloud-speech==2.23.0
+
 # Utilities
 python-multipart==0.0.6
 websockets==12.0
