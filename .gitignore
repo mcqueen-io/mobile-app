@@ -41,6 +41,8 @@ pretrained_models/
 *.h5
 *.model
 *.bin
+audio_dumps/
+data/
 
 # Logs
 *.log
