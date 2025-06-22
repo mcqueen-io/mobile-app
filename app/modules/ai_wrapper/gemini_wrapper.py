@@ -126,8 +126,29 @@ navigation_assistance_tool = FunctionDeclaration(
     }
 )
 
+# Define event extraction tool for intelligent memory formation
+extract_events_tool = FunctionDeclaration(
+    name="extract_events",
+    description="Extract important life events from conversation for intelligent memory storage. Use this to identify and structure significant events, plans, or emotional moments that should be remembered and followed up on.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "conversation_text": {
+                "type": "string",
+                "description": "The conversation text to analyze for important events"
+            },
+            "participants": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "List of user IDs participating in the conversation"
+            }
+        },
+        "required": ["conversation_text", "participants"]
+    }
+)
+
 # Combine all tools
-all_tools = [get_user_preference_tool, search_memories_tool, web_search_tool, navigation_assistance_tool]
+all_tools = [get_user_preference_tool, search_memories_tool, web_search_tool, navigation_assistance_tool, extract_events_tool]
 
 class GeminiWrapper:
     def __init__(self, api_key: str, project_id: str, location: str):
@@ -160,7 +181,7 @@ class GeminiWrapper:
         )
         
         # Combine all tools
-        self.tools = [get_user_preference_tool, search_memories_tool, web_search_tool, navigation_assistance_tool]
+        self.tools = [get_user_preference_tool, search_memories_tool, web_search_tool, navigation_assistance_tool, extract_events_tool]
         
         try:
             # Initialize Vertex AI
@@ -186,6 +207,17 @@ SAFETY PROTOCOL:
 - Driver safety = absolute priority
 - If unsafe during driving: "I'll help when you're safely stopped"
 - Adapt complexity to driving context (brief while moving, detailed when parked)
+
+INTELLIGENT MEMORY FORMATION:
+- ACTIVELY LISTEN for important life events in conversations
+- EXTRACT structured data from: interviews, appointments, plans, emotional moments, deadlines
+- IDENTIFY events worth remembering: dates, times, companies, people, emotions
+- USE extract_events tool when detecting significant events that should be stored for future reflection
+- EXAMPLES of events to extract:
+  * "I have an interview at Google next Friday for Software Engineer" → Extract: event_type=interview, date=next Friday, company=Google, role=Software Engineer
+  * "Mom's birthday is coming up next month" → Extract: event_type=birthday, person=Mom, date=next month
+  * "I'm stressed about the presentation tomorrow" → Extract: event_type=presentation, date=tomorrow, emotion=stressed
+  * "We're planning a family trip to Hawaii in summer" → Extract: event_type=trip, destination=Hawaii, timeframe=summer, participants=family
 
 OUTPUT STRUCTURE:
 ```

@@ -40,3 +40,4 @@ pytest==7.4.3
 speechbrain==0.5.15
 geopy==2.4.1
 python-jose[cryptography]==3.5.0
+python-dateutil==2.8.2

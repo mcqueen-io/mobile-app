@@ -1,5 +1,6 @@
 from typing import Dict, Any, List
 from app.services.unified_service import UnifiedService
+from app.services.memory_intelligence_service import get_memory_intelligence_service
 import aiohttp
 import json
 from app.core.config import settings
@@ -28,6 +29,8 @@ class ToolHandler:
             )
         elif tool_name == "navigation_assistance":
             return await self._execute_navigation_assistance(tool_args)
+        elif tool_name == "extract_events":
+            return await self._execute_event_extraction(tool_args)
         else:
             raise ValueError(f"Unknown tool: {tool_name}")
 
@@ -200,4 +203,40 @@ class ToolHandler:
             return {
                 "success": False,
                 "error": f"Navigation assistance error: {str(e)}"
+            }
+
+    async def _execute_event_extraction(self, tool_args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute intelligent event extraction from conversation text"""
+        try:
+            conversation_text = tool_args.get("conversation_text", "")
+            participants = tool_args.get("participants", [])
+            
+            if not conversation_text.strip():
+                return {
+                    "success": False,
+                    "error": "No conversation text provided for event extraction"
+                }
+            
+            if not participants:
+                return {
+                    "success": False,
+                    "error": "No participants provided for event extraction"
+                }
+            
+            # Get the Memory Intelligence Service
+            memory_service = await get_memory_intelligence_service()
+            
+            # Extract and store events
+            result = await memory_service.extract_and_store_events(
+                conversation_text=conversation_text,
+                participants=participants
+            )
+            
+            return result
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Event extraction error: {str(e)}",
+                "events_found": 0
             }
