@@ -39,9 +39,27 @@ class VoiceProcessor:
         # Initialize ChromaDB Manager
         self.chroma_manager: ChromaManager = get_chroma_manager()
         self.embeddings_collection_name = "voice_embeddings"
-        # Ensure the collection exists
-        self.chroma_manager.get_or_create_collection(self.embeddings_collection_name)
+        # Ensure the collection exists with cosine similarity for voice embeddings
+        self._initialize_voice_embeddings_collection()
         
+    def _initialize_voice_embeddings_collection(self):
+        """Initialize voice embeddings collection with cosine similarity"""
+        try:
+            # Check if collection exists
+            existing_collections = [col.name for col in self.chroma_manager.client.list_collections()]
+            if self.embeddings_collection_name in existing_collections:
+                logger.info(f"Retrieved existing voice embeddings collection: {self.embeddings_collection_name}")
+            else:
+                # Create collection with cosine similarity for voice embeddings
+                collection = self.chroma_manager.client.create_collection(
+                    name=self.embeddings_collection_name,
+                    metadata={"hnsw:space": "cosine"}  # Use cosine similarity like memory store
+                )
+                logger.info(f"Created new voice embeddings collection with cosine similarity: {self.embeddings_collection_name}")
+        except Exception as e:
+            logger.error(f"Error initializing voice embeddings collection: {str(e)}")
+            raise
+
     def _list_audio_devices(self):
         """List available audio input devices"""
         try:

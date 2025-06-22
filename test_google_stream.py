@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import queue
 import threading
 import struct
+import traceback
 
 # Load environment variables
 load_dotenv()
@@ -21,6 +22,10 @@ CHUNK_SIZE = int(SAMPLE_RATE * CHUNK_DURATION)
 
 # Audio queue for thread-safe audio passing
 audio_queue = queue.Queue()
+
+# Set the default input device to index 1 (Microphone - Realtek High Definition Audio, MME)
+sd.default.device = 1
+print(f"[INFO] Using input device: {sd.query_devices(1)['name']} (index 1)")
 
 def audio_callback(indata, frames, time, status):
     """Callback for continuous audio stream"""
@@ -38,13 +43,13 @@ async def audio_generator():
     debug_duration = 3  # seconds
     debug_samples = int(SAMPLE_RATE * debug_duration)
     
-    # Use MacBook Pro Microphone explicitly (device index 2 from the test)
-    device_info = sd.query_devices(2, 'input')
+    # Use MacBook Pro Microphone explicitly (device index 1 from the test)
+    device_info = sd.query_devices(1, 'input')
     print(f"Using audio device: {device_info['name']}")
     
     # Start the audio stream
     stream = sd.InputStream(
-        device=2,  # MacBook Pro Microphone
+        device=1,  # MacBook Pro Microphone
         samplerate=SAMPLE_RATE,
         channels=CHANNELS,
         dtype='int16',  # Changed to int16 directly
@@ -145,7 +150,7 @@ async def handle_websocket_messages(websocket):
 
 async def main():
     """Main function to handle WebSocket connection and audio streaming"""
-    # Use Google transcriber endpoint
+    # Use Google transcriber endpoint - connecting to local server with provider parameter
     uri = "ws://localhost:8000/api/v1/voice/ws/stream?provider=google"
     websocket = None
     
@@ -178,7 +183,8 @@ async def main():
     except websockets.exceptions.ConnectionClosed as e:
         print(f"WebSocket connection closed: {e}")
     except Exception as e:
-        print(f"Error in main loop: {e}")
+        print('Error in main loop:')
+        traceback.print_exc()
     finally:
         if websocket:
             await websocket.close()

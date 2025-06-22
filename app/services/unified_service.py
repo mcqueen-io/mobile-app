@@ -182,6 +182,33 @@ class UnifiedService:
         except Exception:
             return "unknown"
 
+    # Additional User Management Methods
+    async def add_relationship(self, user_id: str, relationship_data: Dict) -> None:
+        """Add a relationship between users"""
+        await self.ensure_initialized()
+        await self.db.add_relationship(
+            user_id=user_id,
+            related_user_id=relationship_data["user_id"],
+            relationship_type=relationship_data["type"],
+            metadata=relationship_data.get("metadata", {}),
+            since=relationship_data.get("since")
+        )
+
+    async def update_preferences(self, user_id: str, preferences: Dict) -> bool:
+        """Update user preferences"""
+        await self.ensure_initialized()
+        return await self.db.update_preferences(user_id, preferences)
+
+    async def get_preference_history(self, user_id: str, preference_type: Optional[str] = None, limit: int = 10) -> List:
+        """Get preference change history"""
+        await self.ensure_initialized()
+        return await self.db.get_preference_history(user_id, preference_type, limit)
+
+    async def suggest_connections(self, user_id: str, max_depth: int = 2, min_common_interests: int = 2) -> List:
+        """Suggest connections for a user"""
+        await self.ensure_initialized()
+        return await self.db.suggest_connections(user_id, max_depth, min_common_interests)
+
 # Singleton instance
 _unified_service = None
 

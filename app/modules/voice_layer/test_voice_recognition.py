@@ -7,7 +7,7 @@ async def test_voice_recognition():
     """Test the voice recognition system with noise suppression"""
     try:
         # Get voice processor instance
-        processor = get_voice_processor()
+        processor = await get_voice_processor()
         
         # Create test recordings directory
         test_dir = Path("test_recordings")

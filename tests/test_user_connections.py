@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime
-from app.services.user_service import get_user_service
+from app.services.unified_service import get_unified_service
 from app.db.mongo_manager import get_mongo_manager
 from dotenv import load_dotenv
 
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 async def create_test_users():
     """Create test users with different preferences"""
-    service = await get_user_service()
+    service = await get_unified_service()
     
     # Create main user
     main_user = await service.create_user({
@@ -73,7 +73,7 @@ async def create_test_users():
 
 async def establish_relationships(main_user, other_users):
     """Establish relationships between users"""
-    service = await get_user_service()
+    service = await get_unified_service()
     
     # Add direct relationships
     await service.add_relationship(main_user.id, {
@@ -95,7 +95,7 @@ async def establish_relationships(main_user, other_users):
 
 async def test_connection_suggestions(main_user):
     """Test connection suggestions"""
-    service = await get_user_service()
+    service = await get_unified_service()
     
     # Get connection suggestions
     suggestions = await service.suggest_connections(
@@ -113,7 +113,7 @@ async def test_connection_suggestions(main_user):
 
 async def test_preference_updates(main_user):
     """Test preference updates and history"""
-    service = await get_user_service()
+    service = await get_unified_service()
     
     # Update preferences
     new_preferences = {
