@@ -4,6 +4,7 @@ from datetime import datetime
 from app.services.unified_service import get_unified_service
 from app.db.mongo_manager import get_mongo_manager
 from dotenv import load_dotenv
+from typing import Dict
 
 # Load environment variables from .env file
 load_dotenv()
