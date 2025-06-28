@@ -86,6 +86,7 @@ mobile-app/
 ├── setup.py                          # Package setup
 └── README.md                         # This file
 ```
+![image](https://github.com/user-attachments/assets/58090fe7-6513-4e30-ab47-74f71766a13b)
 
 ## 🚀 Setup
 
