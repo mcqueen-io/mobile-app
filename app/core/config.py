@@ -50,8 +50,8 @@ class Settings(BaseSettings):
     # Voice Processing
     VOICE_MODEL_PATH: str = os.getenv("VOICE_MODEL_PATH", "./models/voice_embedding")
     
-    # MCP Settings
-    MCP_SERVER_URL: str = os.getenv("MCP_SERVER_URL", "http://localhost:8001")
+    # MCP Settings (Microservice)
+    MCP_SERVER_URL: str = os.getenv("MCP_SERVER_URL", "http://localhost:3001")
     
     # Google Cloud Settings
     GOOGLE_CLOUD_PROJECT: str
