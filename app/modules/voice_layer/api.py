@@ -321,8 +321,30 @@ async def websocket_transcribe(websocket: WebSocket, provider: str = "deepgram")
                 logger.error(f"Error sending transcript to client: {str(e)}")
                 websocket_active = False
 
-        # Start transcription with session_id
-        success = await transcriber.start_transcription(handle_transcript, session_id)
+        # Callback function to handle audio output from TTS
+        async def handle_audio_output(audio_data: bytes):
+            nonlocal websocket_active
+            if not websocket_active:
+                return
+            
+            try:
+                # Try to decode as JSON message first (TTS status messages)
+                try:
+                    import json
+                    message = json.loads(audio_data.decode('utf-8'))
+                    await websocket.send_json(message)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    # If not JSON, treat as raw audio data (shouldn't happen with current implementation)
+                    await websocket.send_bytes(audio_data)
+            except WebSocketDisconnect:
+                logger.info("Client disconnected while sending audio")
+                websocket_active = False
+            except Exception as e:
+                logger.error(f"Error sending audio to client: {str(e)}")
+                websocket_active = False
+
+        # Start transcription with session_id and audio output callback
+        success = await transcriber.start_transcription(handle_transcript, session_id, handle_audio_output)
         if not success:
             logger.error("Failed to start transcription")
             return

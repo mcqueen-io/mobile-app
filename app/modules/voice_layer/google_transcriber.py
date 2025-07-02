@@ -12,6 +12,7 @@ from google.cloud import speech
 import logging
 from app.modules.voice_layer.voice_processor import get_voice_processor
 from app.modules.ai_wrapper.gemini_wrapper import get_gemini_wrapper
+from app.modules.voice_layer.deepgram_tts import get_deepgram_tts
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ class GoogleTranscriber:
         self._silence_timer_task = None
         self._last_transcript_time = None
         self._conversation_buffer = []
-        self._silence_threshold = 5.0  # seconds
+        self._silence_threshold = 2.0  # seconds - reduced for testing
         
         # Text deduplication tracking
         self._last_final_text = ""  # Track last final transcript to extract deltas
@@ -51,6 +52,10 @@ class GoogleTranscriber:
         
         # Voice processor for speaker identification
         self._voice_processor = None
+        
+        # TTS for responses
+        self._tts_engine = None
+        self._audio_output_callback = None
         
         self._initialize_google_client()
 
@@ -610,8 +615,6 @@ class GoogleTranscriber:
         except Exception as e:
             logger.error(f"Error resetting silence timer: {str(e)}")
 
-
-
     async def _silence_timeout(self):
         """Handle silence timeout for conversation end detection."""
         try:
@@ -654,13 +657,13 @@ class GoogleTranscriber:
                 for speaker in stats['identified_speakers']:
                     print(f"     Speaker {speaker['speaker_number']}: {speaker['display_name']}")
             
-            # TODO: Send to LLM here
-            # llm_response = await self._send_to_llm(conversation_text)
-            # await self._send_llm_response_to_client(llm_response)
-
+            # Get LLM response
             llm_wrapper = await get_gemini_wrapper()
             llm_response = await llm_wrapper.chat("test_user_123", conversation_text)
             print(f"🤖 LLM response: {llm_response}")
+            
+            # Convert LLM response to speech using streaming TTS
+            await self._speak_response(llm_response)
             
             # Clear conversation buffer
             self._conversation_buffer = []
@@ -739,7 +742,7 @@ class GoogleTranscriber:
         #     return f"User_{user_id}"
         return user_id
 
-    async def start_transcription(self, on_transcript: Callable[[Dict[str, Any]], None], session_id: str):
+    async def start_transcription(self, on_transcript: Callable[[Dict[str, Any]], None], session_id: str, on_audio_output: Optional[Callable[[bytes], None]] = None):
         """Start a Google Cloud Speech transcription session."""
         try:
             if not self.client:
@@ -751,6 +754,10 @@ class GoogleTranscriber:
             self.is_connected = False
             self._on_transcript_callback = on_transcript
             self._event_loop = asyncio.get_event_loop()
+
+            # Set audio output callback for TTS
+            if on_audio_output:
+                self.set_audio_output_callback(on_audio_output)
 
             # Initialize audio file for this session
             self._initialize_audio_file(session_id)
@@ -894,6 +901,122 @@ class GoogleTranscriber:
             logger.error(f"Error getting full conversation: {str(e)}")
             return "Error retrieving conversation"
 
+    async def _speak_response(self, text: str):
+        """Convert text response to speech using streaming TTS"""
+        try:
+            if not self._tts_engine:
+                # Initialize TTS engine if not already done
+                from app.core.config import settings
+                self._tts_engine = await get_deepgram_tts(settings.DEEPGRAM_API_KEY)
+            
+            print(f"🗣️ Speaking response: {text[:50]}...")
+            
+            # Helper function to safely call audio output callback
+            def safe_audio_callback(message_bytes: bytes):
+                """Safely call the audio output callback, handling both sync and async callbacks"""
+                if self._audio_output_callback:
+                    try:
+                        if self._event_loop and self._event_loop.is_running():
+                            # Schedule the coroutine on the event loop
+                            asyncio.run_coroutine_threadsafe(
+                                self._audio_output_callback(message_bytes),
+                                self._event_loop
+                            )
+                        else:
+                            logger.warning("Event loop not available for audio callback")
+                    except Exception as e:
+                        logger.error(f"Error in audio output callback: {e}")
+            
+            # First, send a message indicating TTS start
+            if self._audio_output_callback:
+                import json
+                tts_start_message = {
+                    "type": "tts_start",
+                    "message": "Starting text-to-speech conversion",
+                    "text_preview": text[:100] + "..." if len(text) > 100 else text
+                }
+                try:
+                    # Send as JSON string bytes for WebSocket
+                    message_bytes = json.dumps(tts_start_message).encode('utf-8')
+                    safe_audio_callback(message_bytes)
+                except Exception as e:
+                    logger.error(f"Error sending TTS start message: {e}")
+            
+            def on_audio_chunk(audio_chunk: bytes):
+                """Handle streaming audio chunks from TTS"""
+                try:
+                    # Send audio chunk with type indicator to the audio output callback
+                    if self._audio_output_callback:
+                        import json
+                        import base64
+                        
+                        # Create audio message
+                        audio_message = {
+                            "type": "tts_audio",
+                            "audio_data": base64.b64encode(audio_chunk).decode('utf-8'),
+                            "size": len(audio_chunk)
+                        }
+                        
+                        # Send as JSON string bytes for WebSocket
+                        message_bytes = json.dumps(audio_message).encode('utf-8')
+                        safe_audio_callback(message_bytes)
+                    else:
+                        # Default: save chunks to file for debugging
+                        self._save_tts_chunk_for_debug(audio_chunk)
+                except Exception as e:
+                    logger.error(f"Error handling TTS audio chunk: {str(e)}")
+            
+            # Use streaming TTS
+            success = await self._tts_engine.speak_streaming(text, on_audio_chunk)
+            
+            # Send completion message
+            if self._audio_output_callback:
+                import json
+                tts_end_message = {
+                    "type": "tts_end",
+                    "message": "Text-to-speech conversion completed",
+                    "success": success
+                }
+                try:
+                    message_bytes = json.dumps(tts_end_message).encode('utf-8')
+                    safe_audio_callback(message_bytes)
+                except Exception as e:
+                    logger.error(f"Error sending TTS end message: {e}")
+            
+            if success:
+                print("✅ TTS streaming completed successfully")
+            else:
+                print("❌ TTS streaming failed")
+                
+        except Exception as e:
+            logger.error(f"Error in speech response: {str(e)}")
+            logger.exception("TTS error:")
+
+    def _save_tts_chunk_for_debug(self, audio_chunk: bytes):
+        """Save TTS audio chunks for debugging"""
+        try:
+            # Create audio_dumps directory if it doesn't exist
+            dumps_dir = os.path.join(os.getcwd(), "audio_dumps")
+            os.makedirs(dumps_dir, exist_ok=True)
+            
+            # Generate filename with timestamp
+            session_id = self._session_id or "unknown_session"
+            timestamp = int(time.time() * 1000)  # milliseconds
+            filename = f"tts_chunk_{session_id}_{timestamp}.wav"
+            filepath = os.path.join(dumps_dir, filename)
+            
+            # Save chunk to file
+            with open(filepath, 'ab') as f:  # Append mode for multiple chunks
+                f.write(audio_chunk)
+            
+            logger.debug(f"Saved TTS chunk to: {filepath}")
+            
+        except Exception as e:
+            logger.error(f"Error saving TTS chunk: {str(e)}")
+
+    def set_audio_output_callback(self, callback: Callable[[bytes], None]):
+        """Set callback for handling TTS audio output"""
+        self._audio_output_callback = callback
 
 async def get_google_transcriber() -> GoogleTranscriber:
     """Factory function to get a GoogleTranscriber instance."""
