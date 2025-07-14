@@ -243,25 +243,25 @@ class MCPClient:
             if not headers:
                 return MCPResponse(success=False, error="User not authenticated")
             
-        session = await self.get_session()
+            session = await self.get_session()
             
             payload = {
                 "service_id": service_id,
                 "redirect_uri": redirect_uri
             }
             
-        async with session.post(
-                f"{self.base_url}/api/v1/mcp/auth/{service_id}/oauth-url",
-                json=payload,
-                headers=headers
-            ) as response:
-                result = await response.json()
-                
-                return MCPResponse(
-                    success=result.get("success", False),
-                    data=result.get("data"),
-                    error=result.get("error")
-                )
+            async with session.post(
+                    f"{self.base_url}/api/v1/mcp/auth/{service_id}/oauth-url",
+                    json=payload,
+                    headers=headers
+                ) as response:
+                    result = await response.json()
+                    
+                    return MCPResponse(
+                        success=result.get("success", False),
+                        data=result.get("data"),
+                        error=result.get("error")
+                    )
                 
         except Exception as e:
             logger.error(f"Error getting OAuth URL for {service_id}: {e}")
@@ -354,7 +354,8 @@ class MCPClient:
             if user_id in self.user_sessions:
                 headers = await self._get_auth_headers(user_id)
                 if headers:
-        session = await self.get_session()
+
+                    session = await self.get_session()
                     
                     # Notify server of logout
                     async with session.post(
