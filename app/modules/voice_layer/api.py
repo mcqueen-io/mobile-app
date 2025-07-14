@@ -354,8 +354,141 @@ async def websocket_transcribe(websocket: WebSocket, provider: str = "deepgram")
                 # Receive audio data from client
                 audio_data = await websocket.receive_bytes()
                 
-                # Send audio data to Deepgram
+                # Send audio data to transcriber
                 await transcriber.send_audio(audio_data)
+                
+                # PERSISTENT SESSION: Relaxed health monitoring for Google transcriber
+                if provider == "google" and hasattr(transcriber, 'is_transcription_healthy'):
+                    # Initialize health monitoring with much more relaxed settings
+                    if not hasattr(websocket_transcribe, '_health_check_counter'):
+                        websocket_transcribe._health_check_counter = 0
+                        websocket_transcribe._last_health_check = time.time()
+                        websocket_transcribe._recovery_in_progress = False
+                        
+                        # Configure transcriber for persistent session mode if available
+                        if hasattr(transcriber, 'configure_persistent_session'):
+                            transcriber.configure_persistent_session(enabled=True)
+                            logger.info("Google transcriber configured for persistent session mode")
+                    
+                    websocket_transcribe._health_check_counter += 1
+                    current_time = time.time()
+                    
+                    # MUCH less frequent health checks for persistent sessions
+                    # Check health every 300 chunks (10 minutes at 30ms chunks) OR every 120 seconds
+                    time_since_last_check = current_time - websocket_transcribe._last_health_check
+                    
+                    should_check_health = (
+                        (websocket_transcribe._health_check_counter % 300 == 0) or 
+                        (time_since_last_check > 120.0)  # Every 2 minutes instead of 5 seconds
+                    )
+                    
+                    if should_check_health and not websocket_transcribe._recovery_in_progress:
+                        websocket_transcribe._last_health_check = current_time
+                        
+                        # Only restart on actual connection failures, not timeouts
+                        if not transcriber.is_transcription_healthy():
+                            logger.info(f"Google transcription health check after {websocket_transcribe._health_check_counter} chunks ({time_since_last_check:.0f}s)")
+                            
+                            # Get more details about why it's unhealthy
+                            tts_state = transcriber.get_tts_state() if hasattr(transcriber, 'get_tts_state') else {}
+                            persistent_mode = tts_state.get('persistent_session_mode', False)
+                            
+                            if persistent_mode:
+                                logger.info(f"PERSISTENT SESSION health check - Time since audio: {tts_state.get('time_since_last_audio', 'unknown')}s")
+                                
+                                # Only start recovery if it's a real connection failure (not just timeout)
+                                is_connected = getattr(transcriber, 'is_connected', False)
+                                if not is_connected:
+                                    logger.warning("PERSISTENT SESSION: Connection actually lost - starting gentle recovery")
+                                    
+                                    # Mark recovery as in progress to prevent multiple concurrent recoveries
+                                    websocket_transcribe._recovery_in_progress = True
+                                    
+                                    # More gentle notification for persistent sessions
+                                    await websocket.send_json({
+                                        "type": "system",
+                                        "message": "Reconnecting to transcription service... (preserving session)"
+                                    })
+                                    
+                                    # Start recovery in background task - don't block audio processing
+                                    async def background_recovery():
+                                        try:
+                                            recovery_success = await transcriber.restart_transcription_if_needed()
+                                            
+                                            if recovery_success:
+                                                logger.info("PERSISTENT SESSION: Transcription recovered successfully")
+                                                await websocket.send_json({
+                                                    "type": "system",
+                                                    "message": "Transcription service reconnected successfully"
+                                                })
+                                                # Reset counter after successful recovery
+                                                websocket_transcribe._health_check_counter = 0
+                                            else:
+                                                logger.error("PERSISTENT SESSION: Failed to recover transcription")
+                                                await websocket.send_json({
+                                                    "type": "error",
+                                                    "message": "Transcription service connection lost - please refresh"
+                                                })
+                                                
+                                        except Exception as recovery_error:
+                                            logger.error(f"Error in persistent session recovery: {recovery_error}")
+                                            await websocket.send_json({
+                                                "type": "error",
+                                                "message": "Recovery failed - please refresh page"
+                                            })
+                                        finally:
+                                            # Always clear recovery flag
+                                            websocket_transcribe._recovery_in_progress = False
+                                    
+                                    # Create background task for recovery
+                                    asyncio.create_task(background_recovery())
+                                else:
+                                    logger.info("PERSISTENT SESSION: Health check failed but connection active - keeping session alive")
+                            else:
+                                # Legacy behavior for non-persistent sessions
+                                logger.warning(f"Google transcription unhealthy after {websocket_transcribe._health_check_counter} chunks - starting recovery")
+                                
+                                # Mark recovery as in progress to prevent multiple concurrent recoveries
+                                websocket_transcribe._recovery_in_progress = True
+                                
+                                # Send status to client immediately
+                                await websocket.send_json({
+                                    "type": "system",
+                                    "message": "Transcription service reconnecting... (audio processing continues)"
+                                })
+                                
+                                # Start recovery in background task - don't block audio processing
+                                async def background_recovery():
+                                    try:
+                                        recovery_success = await transcriber.restart_transcription_if_needed()
+                                        
+                                        if recovery_success:
+                                            logger.info("Google transcription recovered successfully")
+                                            await websocket.send_json({
+                                                "type": "system",
+                                                "message": "Transcription service recovered successfully"
+                                            })
+                                            # Reset counter after successful recovery
+                                            websocket_transcribe._health_check_counter = 0
+                                        else:
+                                            logger.error("Failed to recover Google transcription - connection lost")
+                                            await websocket.send_json({
+                                                "type": "error",
+                                                "message": "Transcription service unavailable - please reconnect"
+                                            })
+                                            
+                                    except Exception as recovery_error:
+                                        logger.error(f"Error in background recovery: {recovery_error}")
+                                        await websocket.send_json({
+                                            "type": "error",
+                                            "message": "Recovery failed - please reconnect"
+                                        })
+                                    finally:
+                                        # Always clear recovery flag
+                                        websocket_transcribe._recovery_in_progress = False
+                                
+                                # Create background task for recovery
+                                asyncio.create_task(background_recovery())
                 
         except WebSocketDisconnect:
             logger.info("WebSocket disconnected normally")
