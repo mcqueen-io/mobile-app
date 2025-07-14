@@ -1,7 +1,8 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from app.modules.voice_layer.api import router as voice_router
+from app.modules.voice_registry.api import router as voice_registry_router
+from app.modules.voice_layer.api import router as voice_layer_router
 from app.modules.user_info.api import router as user_router
 from app.modules.memory.api import router as memory_router
 from app.modules.mcp.api import router as mcp_router
@@ -74,7 +75,8 @@ async def root():
     return {"message": "Welcome to In-Car AI Assistant API"}
 
 # Include routers with security
-app.include_router(voice_router, prefix="/api/v1/voice", tags=["voice"])
+app.include_router(voice_registry_router, prefix="/api/v1/voice_registry", tags=["voice_registry"])
+app.include_router(voice_layer_router, prefix="/api/v1/voice", tags=["voice_layer"])
 app.include_router(user_router, prefix="/api/v1/users", tags=["users"])
 app.include_router(memory_router, prefix="/api/v1/memory", tags=["memory"])
 app.include_router(mcp_router, prefix="/api/v1/mcp", tags=["mcp"])
