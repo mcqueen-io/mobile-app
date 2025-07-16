@@ -176,7 +176,7 @@ class ContextManager:
             memories = self.memory_store.get_relevant_memories(
                 session.current_driver,
                 query,
-                limit=5
+                n_results=5
             )
             context["relevant_memories"] = memories
         
