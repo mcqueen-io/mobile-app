@@ -94,7 +94,7 @@ class MCPClient:
         try:
             headers = await self._get_auth_headers(user_id)
             if not headers:
-                return MCPResponse(success=False, error="User not authenticated")
+                return MCPResponse(success=False, error="User not authenticated", metadata={"code": "UNAUTHENTICATED"})
             
             session = await self.get_session()
             
@@ -103,18 +103,22 @@ class MCPClient:
                 headers=headers,
                 params={"user_id": user_id}
             ) as response:
-                result = await response.json()
+                try:
+                    result = await response.json()
+                except Exception:
+                    result = {}
                 
                 if response.status == 200:
                     return MCPResponse(
                         success=True,
                         data=result.get("tools", []),
-                        metadata={"total": result.get("total", 0)}
+                        metadata={"total": result.get("total", 0), "status_code": response.status}
                     )
                 else:
                     return MCPResponse(
                         success=False,
-                        error=f"Failed to get tools: {result.get('error', 'Unknown error')}"
+                        error=f"Failed to get tools: {result.get('error', 'Unknown error')}",
+                        metadata={"status_code": response.status, "code": "UNAUTHENTICATED" if response.status == 401 else "BAD_REQUEST"}
                     )
                     
         except Exception as e:
@@ -130,7 +134,7 @@ class MCPClient:
         try:
             headers = await self._get_auth_headers(user_id)
             if not headers:
-                return MCPResponse(success=False, error="User not authenticated")
+                return MCPResponse(success=False, error="User not authenticated", metadata={"code": "UNAUTHENTICATED"})
             
             session = await self.get_session()
             
@@ -146,13 +150,16 @@ class MCPClient:
                 json=payload,
                 headers=headers
             ) as response:
-                result = await response.json()
+                try:
+                    result = await response.json()
+                except Exception:
+                    result = {}
                 
                 return MCPResponse(
-                    success=result.get("success", False),
+                    success=(response.status == 200 and result.get("success", False)),
                     data=result.get("data"),
-                    error=result.get("error"),
-                    metadata=result.get("metadata", {})
+                    error=result.get("error") or ("Unauthorized" if response.status == 401 else None),
+                    metadata={**result.get("metadata", {}), "status_code": response.status, "code": "UNAUTHENTICATED" if response.status == 401 else result.get("code")}
                 )
                 
         except Exception as e:
@@ -169,7 +176,7 @@ class MCPClient:
         try:
             headers = await self._get_auth_headers(user_id)
             if not headers:
-                return MCPResponse(success=False, error="User not authenticated")
+                return MCPResponse(success=False, error="User not authenticated", metadata={"code": "UNAUTHENTICATED"})
             
             session = await self.get_session()
             
@@ -185,12 +192,16 @@ class MCPClient:
                 json=payload,
                 headers=headers
             ) as response:
-                result = await response.json()
+                try:
+                    result = await response.json()
+                except Exception:
+                    result = {}
                 
                 return MCPResponse(
-                    success=result.get("success", False),
+                    success=(response.status == 200 and result.get("success", False)),
                     data=result.get("data"),
-                    error=result.get("error")
+                    error=result.get("error") or ("Unauthorized" if response.status == 401 else None),
+                    metadata={"status_code": response.status, "code": "UNAUTHENTICATED" if response.status == 401 else result.get("code")}
                 )
                 
         except Exception as e:
@@ -206,7 +217,7 @@ class MCPClient:
         try:
             headers = await self._get_auth_headers(user_id)
             if not headers:
-                return MCPResponse(success=False, error="User not authenticated")
+                return MCPResponse(success=False, error="User not authenticated", metadata={"code": "UNAUTHENTICATED"})
             
             session = await self.get_session()
             
@@ -220,12 +231,16 @@ class MCPClient:
                 json=payload,
                 headers=headers
             ) as response:
-                result = await response.json()
+                try:
+                    result = await response.json()
+                except Exception:
+                    result = {}
                 
                 return MCPResponse(
-                    success=result.get("success", False),
+                    success=(response.status == 200 and result.get("success", False)),
                     data=result.get("data"),
-                    error=result.get("error")
+                    error=result.get("error") or ("Unauthorized" if response.status == 401 else None),
+                    metadata={"status_code": response.status, "code": "UNAUTHENTICATED" if response.status == 401 else result.get("code")}
                 )
                 
         except Exception as e:
@@ -235,13 +250,12 @@ class MCPClient:
                 error=f"Auth setup error: {str(e)}"
             )
     
-    async def get_oauth_url(self, user_id: str, service_id: str, 
-                          redirect_uri: str) -> MCPResponse:
+    async def get_oauth_url(self, user_id: str, service_id: str, redirect_uri: str) -> MCPResponse:
         """Get OAuth URL for a service"""
         try:
             headers = await self._get_auth_headers(user_id)
             if not headers:
-                return MCPResponse(success=False, error="User not authenticated")
+                return MCPResponse(success=False, error="User not authenticated", metadata={"code": "UNAUTHENTICATED"})
             
             session = await self.get_session()
             
@@ -251,17 +265,21 @@ class MCPClient:
             }
             
             async with session.post(
-                    f"{self.base_url}/api/v1/mcp/auth/{service_id}/oauth-url",
-                    json=payload,
-                    headers=headers
-                ) as response:
+                f"{self.base_url}/api/v1/mcp/auth/{service_id}/oauth-url",
+                json=payload,
+                headers=headers
+            ) as response:
+                try:
                     result = await response.json()
-                    
-                    return MCPResponse(
-                        success=result.get("success", False),
-                        data=result.get("data"),
-                        error=result.get("error")
-                    )
+                except Exception:
+                    result = {}
+                
+                return MCPResponse(
+                    success=(response.status == 200 and result.get("success", False)),
+                    data=result.get("data"),
+                    error=result.get("error") or ("Unauthorized" if response.status == 401 else None),
+                    metadata={"status_code": response.status, "code": "UNAUTHENTICATED" if response.status == 401 else result.get("code")}
+                )
                 
         except Exception as e:
             logger.error(f"Error getting OAuth URL for {service_id}: {e}")
@@ -275,7 +293,7 @@ class MCPClient:
         try:
             headers = await self._get_auth_headers(user_id)
             if not headers:
-                return MCPResponse(success=False, error="User not authenticated")
+                return MCPResponse(success=False, error="User not authenticated", metadata={"code": "UNAUTHENTICATED"})
             
             session = await self.get_session()
             
@@ -283,12 +301,16 @@ class MCPClient:
                 f"{self.base_url}/api/v1/mcp/users/{user_id}/profile",
                 headers=headers
             ) as response:
-                result = await response.json()
+                try:
+                    result = await response.json()
+                except Exception:
+                    result = {}
                 
                 return MCPResponse(
-                    success=result.get("success", False),
+                    success=(response.status == 200 and result.get("success", False)),
                     data=result.get("data"),
-                    error=result.get("error")
+                    error=result.get("error") or ("Unauthorized" if response.status == 401 else None),
+                    metadata={"status_code": response.status, "code": "UNAUTHENTICATED" if response.status == 401 else result.get("code")}
                 )
                 
         except Exception as e:
@@ -305,7 +327,7 @@ class MCPClient:
             
             async with session.get(
                 f"{self.base_url}/api/v1/health"
-        ) as response:
+            ) as response:
                 result = await response.json()
                 
                 return MCPResponse(
@@ -354,7 +376,6 @@ class MCPClient:
             if user_id in self.user_sessions:
                 headers = await self._get_auth_headers(user_id)
                 if headers:
-
                     session = await self.get_session()
                     
                     # Notify server of logout
@@ -363,12 +384,9 @@ class MCPClient:
                         headers=headers
                     ) as response:
                         pass  # Don't care about response
-                
                 # Remove local session
                 del self.user_sessions[user_id]
-            
             return MCPResponse(success=True, data={"logged_out": True})
-            
         except Exception as e:
             logger.error(f"Error logging out user {user_id}: {e}")
             return MCPResponse(

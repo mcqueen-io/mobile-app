@@ -8,6 +8,9 @@ import json
 from .tool_handler import ToolHandler
 from .reflection_manager import get_reflection_manager
 from app.services.unified_service import get_unified_service
+from app.modules.ai_wrapper.user_specific_gemini_wrapper import get_user_specific_gemini_wrapper
+import warnings
+from app.core.ai_security import get_ai_security_manager
 
 # Attempt to load environment variables from .env file
 # Note: This should be done at the application entry point, but included here
@@ -309,7 +312,11 @@ SELF-IMPROVEMENT: After complex interactions, internally note: "What worked? How
             return f"An error occurred while processing your request: {str(e)}"
 
     async def chat(self, user_id: str, user_input: str, context: Dict[str, Any] = None) -> str:
-        """Handle a complete chat turn with self-reflection and improvement"""
+        """Handle a complete chat turn with self-reflection and improvement.
+
+        Implements a bounded multi-step ReAct loop: up to 3 tool iterations.
+        Note: This wrapper uses a single shared ChatSession; prefer the user-specific wrapper for isolation.
+        """
         # Ensure context includes user_id for tool handler if needed
         if context is None:
             context = {}
@@ -320,96 +327,147 @@ SELF-IMPROVEMENT: After complex interactions, internally note: "What worked? How
         reflection_manager = get_reflection_manager()
         
         # Pre-response reflection
-        reflection_context = await reflection_manager.pre_response_reflection(user_input, context)
+        try:
+            reflection_context = await reflection_manager.pre_response_reflection(user_input, context)
+        except Exception:
+            reflection_context = {}
         
         # Enhance context with reflection insights
         enhanced_context = {**context, "reflection_insights": reflection_context}
 
-        # Generate response with enhanced context
+        # Multi-step ReAct loop
+        max_steps = 3
+        steps = 0
         ai_response = await self.generate_response(user_input, enhanced_context)
 
-        # Check if the AI requested tool calls
-        # generate_response now returns a list of dicts for tool calls, or a string for text.
-        if isinstance(ai_response, list) and ai_response and 'name' in ai_response[0] and 'args' in ai_response[0]:
-            # This structure indicates tool calls returned by generate_response
-            logger.info(f"AI requested tool calls: {ai_response}")
-            tool_response_parts = []
-            
-            for tool_call in ai_response:
-                if self.tool_handler is None:
-                    logger.error("ToolHandler not initialized.")
-                    continue
-
-                tool_name = tool_call.get('name')
-                tool_args = tool_call.get('args', {})
-
-                try:
-                    # Execute the tool call (await since execute_tool is async)
-                    result_content = await self.tool_handler.execute_tool(
-                        tool_name=tool_name,
-                        tool_args=tool_args
-                    )
-                    
-                    # Create function response part for sending back to the model
-                    tool_response_parts.append(Part.from_function_response(
-                        name=tool_name,
-                        response=result_content  # Send the structured result directly
-                    ))
-                    
-                except Exception as e:
-                    logger.error(f"Error executing tool {tool_name}: {str(e)}")
-                    # Send error response back to model
-                    tool_response_parts.append(Part.from_function_response(
-                        name=tool_name,
-                        response={"error": str(e)}
-                    ))
-
-            # Send tool results back to the model for a final response
-            if tool_response_parts:
+        while steps < max_steps:
+            steps += 1
+            if isinstance(ai_response, list) and ai_response and 'name' in ai_response[0] and 'args' in ai_response[0]:
+                logger.info(f"AI requested tool calls (step {steps}): {ai_response}")
+                tool_response_parts = []
+                for tool_call in ai_response:
+                    if self.tool_handler is None:
+                        logger.error("ToolHandler not initialized.")
+                        continue
+                    tool_name = tool_call.get('name')
+                    tool_args = tool_call.get('args', {})
+                    try:
+                        result_content = await self.tool_handler.execute_tool(
+                            tool_name=tool_name,
+                            tool_args=tool_args
+                        )
+                        tool_response_parts.append(Part.from_function_response(
+                            name=tool_name,
+                            response=result_content
+                        ))
+                    except Exception as e:
+                        logger.error(f"Error executing tool {tool_name}: {str(e)}")
+                        tool_response_parts.append(Part.from_function_response(
+                            name=tool_name,
+                            response={"error": str(e)}
+                        ))
+                if not tool_response_parts:
+                    logger.error("Tool calls indicated but produced no responses.")
+                    break
                 try:
                     final_ai_response = self.chat_session.send_message(tool_response_parts)
-                    final_text_response = final_ai_response.text
-                    
-                    # Post-response reflection for continuous learning
-                    await reflection_manager.post_response_reflection(
-                        user_input, final_text_response
-                    )
-                    
-                    return final_text_response
                 except Exception as e:
                     logger.error(f"Error sending tool results back to model: {str(e)}")
                     return "I executed the tool but had trouble processing the results. Please try again."
-            else:
-                logger.error("Tool calls were indicated, but no results were obtained after execution attempt.")
-                return "An internal error occurred during tool execution."
 
-        elif isinstance(ai_response, str):
-            # Post-response reflection for direct text responses
-            await reflection_manager.post_response_reflection(
-                user_input, ai_response
-            )
-            
-            # If the initial response was text, just return it
-            return ai_response
-        else:
-             # Handle unexpected response types from initial generate_response call
-             logger.error(f"Received unexpected response type from generate_response: {type(ai_response)}")
-             return "An unexpected error occurred after generating initial response."
+                function_calls = []
+                text_content = ""
+                if hasattr(final_ai_response, 'candidates') and final_ai_response.candidates:
+                    candidate = final_ai_response.candidates[0]
+                    if hasattr(candidate, 'content') and candidate.content:
+                        for part in candidate.content.parts:
+                            if hasattr(part, 'function_call') and part.function_call:
+                                function_calls.append({
+                                    "name": part.function_call.name,
+                                    "args": dict(part.function_call.args)
+                                })
+                            elif hasattr(part, 'text') and part.text:
+                                text_content += part.text
+                if function_calls:
+                    ai_response = function_calls
+                    continue
+                final_text_response = text_content or getattr(final_ai_response, 'text', '')
+                try:
+                    await reflection_manager.post_response_reflection(user_input, final_text_response)
+                except Exception:
+                    pass
+                return final_text_response
+
+            if isinstance(ai_response, str):
+                try:
+                    await reflection_manager.post_response_reflection(user_input, ai_response)
+                except Exception:
+                    pass
+                return ai_response
+
+            logger.error(f"Unexpected AI response type at step {steps}: {type(ai_response)}")
+            break
+
+        return "I'm having trouble completing this step right now. Please try again."
 
 # Singleton instance
-_gemini_wrapper: Optional[GeminiWrapper] = None
+# --- Unified adapter for backward compatibility ---
 
-async def get_gemini_wrapper() -> GeminiWrapper:
-    """Get singleton instance of GeminiWrapper, initializing if necessary"""
-    global _gemini_wrapper
-    if _gemini_wrapper is None:
-        # Ensure settings are loaded (should be done at app startup)
-        # from app.core.config import settings # Already imported at top
-        
-        _gemini_wrapper = GeminiWrapper(
-            api_key=settings.GOOGLE_APPLICATION_CREDENTIALS, # Assuming this is the path to your credentials file
-            project_id=settings.GOOGLE_CLOUD_PROJECT,
-            location=settings.GOOGLE_CLOUD_LOCATION
+class UnifiedGeminiAdapter:
+    """Adapter that routes all calls to the UserSpecificGeminiWrapper.
+
+    This preserves backward-compatibility for existing imports of get_gemini_wrapper()
+    while ensuring per-user session isolation under the hood.
+    """
+
+    def __init__(self):
+        self._delegate = None
+
+    async def initialize(self):
+        if self._delegate is None:
+            self._delegate = await get_user_specific_gemini_wrapper()
+
+    async def generate_response(self, user_input: str, context: Dict[str, Any] = None) -> Union[str, List[Dict[str, Any]]]:
+        """Backward-compatible signature.
+
+        Extracts user_id from context if present, otherwise uses 'anonymous'.
+        """
+        if self._delegate is None:
+            await self.initialize()
+        user_id = None
+        if context and isinstance(context, dict):
+            user_id = context.get("user_id") or context.get("userId")
+        if not user_id:
+            user_id = "anonymous"
+        # AI security
+        try:
+            ai_sec = get_ai_security_manager()
+            safe_input = ai_sec.sanitize_input(user_input)
+            if not ai_sec.check_prompt_injection(safe_input):
+                return "I can't process that request as it looks unsafe. Could you rephrase?"
+            user_input = safe_input
+        except Exception:
+            pass
+        # Cap context stringifying in adapter layer as well
+        return await self._delegate.generate_response(user_id, user_input, context)
+
+    async def chat(self, user_id: str, user_input: str, context: Dict[str, Any] = None) -> str:
+        if self._delegate is None:
+            await self.initialize()
+        return await self._delegate.chat(user_id, user_input, context)
+
+
+_gemini_wrapper_adapter: Optional[UnifiedGeminiAdapter] = None
+
+async def get_gemini_wrapper() -> UnifiedGeminiAdapter:
+    """Return unified wrapper adapter (delegates to per-user wrapper)."""
+    global _gemini_wrapper_adapter
+    if _gemini_wrapper_adapter is None:
+        warnings.warn(
+            "get_gemini_wrapper() now returns a unified adapter delegating to the user-specific wrapper.",
+            DeprecationWarning,
+            stacklevel=2,
         )
-        await _gemini_wrapper.initialize() # Initialize tool handler and other async components
-    return _gemini_wrapper 
+        _gemini_wrapper_adapter = UnifiedGeminiAdapter()
+        await _gemini_wrapper_adapter.initialize()
+    return _gemini_wrapper_adapter

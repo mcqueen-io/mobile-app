@@ -62,7 +62,7 @@ class ConversationBufferManager:
             )
         else:
             # Check for topic shift
-            topic_shifted = await self._detect_topic_shift(current_chunk, utterance_data)
+            topic_shifted = await self._detect_topic_shift(current_chunk, utterance_data, user_id)
             
             if topic_shifted or self._should_force_chunk(current_chunk):
                 # Complete current chunk and start new one
@@ -130,7 +130,7 @@ class ConversationBufferManager:
         chunk.importance_score = max(chunk.importance_score, new_importance)
     
     async def _detect_topic_shift(self, current_chunk: ConversationChunk, 
-                                 utterance_data: Dict) -> bool:
+                                 utterance_data: Dict, user_id: str) -> bool:
         """Detect if there's a significant topic shift"""
         
         current_topic = current_chunk.topic
@@ -139,12 +139,12 @@ class ConversationBufferManager:
         # Simple topic comparison (can be enhanced with semantic similarity)
         if current_topic != new_topic:
             # Use LLM to determine if this is a significant shift
-            return await self._llm_topic_shift_analysis(current_chunk, utterance_data)
+            return await self._llm_topic_shift_analysis(current_chunk, utterance_data, user_id)
         
         return False
     
     async def _llm_topic_shift_analysis(self, current_chunk: ConversationChunk, 
-                                       utterance_data: Dict) -> bool:
+                                       utterance_data: Dict, user_id: str) -> bool:
         """Use LLM to analyze if topic shift is significant enough to chunk"""
         
         # Get recent utterances from current chunk
@@ -173,7 +173,7 @@ Respond with JSON:
 """
         
         try:
-            response = await self.gemini.generate_response(prompt)
+            response = await self.gemini.generate_response(user_id, prompt)
             
             # Parse response
             if isinstance(response, str):
@@ -211,8 +211,10 @@ Respond with JSON:
         """Complete a chunk by generating summary and storing"""
         
         # Generate summary
-        chunk.summary = await self._generate_chunk_summary(chunk)
-        chunk.key_points = await self._extract_key_points(chunk)
+        # Use the first participant as the LLM session owner for summarization
+        owner_user_id = chunk.participants[0] if chunk.participants else "anonymous"
+        chunk.summary = await self._generate_chunk_summary(chunk, owner_user_id)
+        chunk.key_points = await self._extract_key_points(chunk, owner_user_id)
         
         # Store chunk summary in long-term memory
         await self._store_chunk_summary(chunk)
@@ -228,7 +230,7 @@ Respond with JSON:
         print(f"  Participants: {chunk.participants}")
         print(f"  Summary: {chunk.summary[:100]}...")
     
-    async def _generate_chunk_summary(self, chunk: ConversationChunk) -> str:
+    async def _generate_chunk_summary(self, chunk: ConversationChunk, user_id: str) -> str:
         """Generate a concise summary of the conversation chunk"""
         
         # Build conversation text
@@ -257,13 +259,13 @@ Create a 2-3 sentence summary that captures:
 Summary:"""
         
         try:
-            summary = await self.gemini.generate_response(prompt)
+            summary = await self.gemini.generate_response(user_id, prompt)
             return summary.strip() if isinstance(summary, str) else "Conversation summary unavailable"
         except Exception as e:
             print(f"Summary generation failed: {e}")
             return f"Conversation about {chunk.topic} with {len(chunk.utterances)} messages"
     
-    async def _extract_key_points(self, chunk: ConversationChunk) -> List[str]:
+    async def _extract_key_points(self, chunk: ConversationChunk, user_id: str) -> List[str]:
         """Extract key points from the conversation chunk"""
         
         conversation_text = []
@@ -291,7 +293,7 @@ Focus on:
 """
         
         try:
-            response = await self.gemini.generate_response(prompt)
+            response = await self.gemini.generate_response(user_id, prompt)
             
             if isinstance(response, str):
                 response = response.strip()

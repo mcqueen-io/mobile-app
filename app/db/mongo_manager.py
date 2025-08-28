@@ -1,6 +1,14 @@
 import os
 import sys
 
+# Ensure environment variables from .env are loaded before we attempt to read them
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ModuleNotFoundError:
+    # python-dotenv may not be installed in some environments; skip if unavailable
+    pass
+
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import MongoClient, IndexModel, ASCENDING, DESCENDING
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
@@ -53,6 +61,15 @@ class MongoManager:
                     try:
                         # Get MongoDB URI from environment variable or use default
                         mongo_uri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017')
+
+                        # If USE_MONGOMOCK is set, skip real connection
+                        if os.getenv('USE_MONGOMOCK', 'false').lower() == 'true':
+                            import mongomock
+                            logger.warning("USE_MONGOMOCK is enabled. Using in-memory mock MongoDB.")
+                            self._client = mongomock.MongoClient()
+                            self._db = self._client.family_assistant
+                            self._initialized = True
+                            return
                         
                         # Initialize async client
                         self._client = AsyncIOMotorClient(
@@ -68,14 +85,26 @@ class MongoManager:
                         # Get database
                         self._db = self._client.family_assistant
                         
-                        # Test connection
-                        await self._client.admin.command('ping')
+                        # Test connection with timeout
+                        try:
+                            await asyncio.wait_for(self._client.admin.command('ping'), timeout=3)
+                        except (asyncio.TimeoutError, Exception) as ping_error:
+                            logger.error(f"MongoDB ping failed: {ping_error}")
+                            raise ServerSelectionTimeoutError(ping_error)
                         logger.info("Successfully connected to MongoDB")
                         
                         self._initialized = True
                     except (ConnectionFailure, ServerSelectionTimeoutError) as e:
                         logger.error(f"Failed to connect to MongoDB: {str(e)}")
-                        raise
+                        try:
+                            import mongomock
+                            logger.warning("Falling back to in-memory mongomock client for testing purposes")
+                            self._client = mongomock.MongoClient()
+                            self._db = self._client.family_assistant
+                            self._initialized = True
+                        except ImportError:
+                            logger.error("mongomock not installed. Cannot proceed without MongoDB connection.")
+                            raise
 
     async def close(self):
         """Close MongoDB connection"""
@@ -104,6 +133,11 @@ class MongoManager:
                     logger.info(f"Dropping existing collection: {collection_name}")
                     await db.drop_collection(collection_name)
 
+            # Remove location_feedback collection as it's not needed
+            if 'location_feedback' in await db.list_collection_names():
+                logger.info("Dropping location_feedback collection - not needed")
+                await db.drop_collection('location_feedback')
+
             # Users collection with enhanced indexes
             await db.create_collection('users')
             user_indexes = [
@@ -114,7 +148,9 @@ class MongoManager:
                 IndexModel([('preferences.cuisine', ASCENDING)]),
                 IndexModel([('preferences.genre', ASCENDING)]),
                 IndexModel([('activities', ASCENDING)]),
-                IndexModel([('voice_profile.embedding_version', ASCENDING)])
+                IndexModel([('voice_profile.embedding_version', ASCENDING)]),
+                IndexModel([('notification_preferences.enabled', ASCENDING)]),
+                IndexModel([('notification_preferences.calendar_integration', ASCENDING)])
             ]
             await db.users.create_indexes(user_indexes)
             
@@ -127,13 +163,17 @@ class MongoManager:
             ]
             await db.preferences_history.create_indexes(pref_history_indexes)
             
-            # Events collection
+            # Enhanced Events collection with reminders support
             await db.create_collection('events')
             event_indexes = [
                 IndexModel([('datetime', ASCENDING)]),
                 IndexModel([('participants', ASCENDING)]),
                 IndexModel([('status', ASCENDING)]),
-                IndexModel([('created_at', ASCENDING)], expireAfterSeconds=31536000)
+                IndexModel([('created_at', ASCENDING)], expireAfterSeconds=31536000),
+                IndexModel([('reminders.reminder_time', ASCENDING)]),
+                IndexModel([('reminders.status', ASCENDING)]),
+                IndexModel([('reminders.user_id', ASCENDING)]),
+                IndexModel([('type', ASCENDING)])
             ]
             await db.events.create_indexes(event_indexes)
             
@@ -148,10 +188,23 @@ class MongoManager:
                 IndexModel([('visibility.shared_with', ASCENDING)]),
                 IndexModel([('visibility.family_branch', ASCENDING)]),
                 IndexModel([('metadata.tags', ASCENDING)]),
-                IndexModel([('metadata.participants', ASCENDING)])
+                IndexModel([('metadata.participants', ASCENDING)]),
+                IndexModel([('chroma_id', ASCENDING)]),  # Link to ChromaDB
+                IndexModel([('conversation_id', ASCENDING)])  # Link conversations
             ]
             # Create indexes. MongoDB's create_indexes is idempotent.
             await db.memories.create_indexes(memory_indexes)
+            
+            # Add reminders collection for better reminder management
+            await db.create_collection('reminders')
+            reminder_indexes = [
+                IndexModel([('user_id', ASCENDING)]),
+                IndexModel([('reminder_time', ASCENDING)]),
+                IndexModel([('status', ASCENDING)]),
+                IndexModel([('event_id', ASCENDING)]),
+                IndexModel([('created_at', DESCENDING)])
+            ]
+            await db.reminders.create_indexes(reminder_indexes)
             
             logger.info("Successfully created collections and indexes")
             
@@ -629,6 +682,172 @@ class MongoManager:
             return str(result.inserted_id)
         except Exception as e:
             logger.error(f"Error creating family tree: {str(e)}")
+            raise
+
+    # REMINDER MANAGEMENT METHODS
+    async def create_reminder(self, reminder_data: Dict) -> str:
+        """Create a new reminder"""
+        try:
+            reminder_data.update({
+                'created_at': datetime.utcnow(),
+                'updated_at': datetime.utcnow(),
+                'status': 'active'  # active, completed, cancelled
+            })
+            result = await self.db.reminders.insert_one(reminder_data)
+            logger.info(f"Reminder created with ID: {result.inserted_id}")
+            return str(result.inserted_id)
+        except Exception as e:
+            logger.error(f"Error creating reminder: {str(e)}")
+            raise
+
+    async def get_user_reminders(self, user_id: str, status: str = 'active') -> List[Dict]:
+        """Get all reminders for a user"""
+        try:
+            query = {'user_id': user_id}
+            if status:
+                query['status'] = status
+            
+            cursor = self.db.reminders.find(query).sort('reminder_time', ASCENDING)
+            return await cursor.to_list(length=None)
+        except Exception as e:
+            logger.error(f"Error getting user reminders: {str(e)}")
+            raise
+
+    async def get_upcoming_reminders(self, user_id: str, limit: int = 10) -> List[Dict]:
+        """Get upcoming reminders for a user"""
+        try:
+            query = {
+                'user_id': user_id,
+                'status': 'active',
+                'reminder_time': {'$gte': datetime.utcnow()}
+            }
+            cursor = self.db.reminders.find(query).sort('reminder_time', ASCENDING).limit(limit)
+            return await cursor.to_list(length=limit)
+        except Exception as e:
+            logger.error(f"Error getting upcoming reminders: {str(e)}")
+            raise
+
+    async def update_reminder_status(self, reminder_id: str, status: str, user_id: str = None) -> bool:
+        """Update reminder status with optional user permission check"""
+        try:
+            query = {'_id': reminder_id}
+            if user_id:
+                query['user_id'] = user_id  # Ensure user can only update their own reminders
+            
+            result = await self.db.reminders.update_one(
+                query,
+                {
+                    '$set': {
+                        'status': status,
+                        'updated_at': datetime.utcnow()
+                    }
+                }
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"Error updating reminder status: {str(e)}")
+            raise
+
+    async def delete_reminder(self, reminder_id: str, user_id: str = None) -> bool:
+        """Delete a reminder with optional user permission check"""
+        try:
+            query = {'_id': reminder_id}
+            if user_id:
+                query['user_id'] = user_id  # Ensure user can only delete their own reminders
+            
+            result = await self.db.reminders.delete_one(query)
+            return result.deleted_count > 0
+        except Exception as e:
+            logger.error(f"Error deleting reminder: {str(e)}")
+            raise
+
+    async def add_reminder_to_event(self, event_id: str, reminder_data: Dict) -> bool:
+        """Add a reminder to an existing event"""
+        try:
+            result = await self.db.events.update_one(
+                {'_id': event_id},
+                {
+                    '$push': {'reminders': reminder_data},
+                    '$set': {'updated_at': datetime.utcnow()}
+                }
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"Error adding reminder to event: {str(e)}")
+            raise
+
+    async def get_events_with_reminders(self, user_id: str, limit: int = 10) -> List[Dict]:
+        """Get events that have reminders for a specific user"""
+        try:
+            query = {
+                '$or': [
+                    {'participants': user_id},
+                    {'created_by': user_id}
+                ],
+                'reminders': {'$exists': True, '$ne': []}
+            }
+            cursor = self.db.events.find(query).sort('datetime', ASCENDING).limit(limit)
+            return await cursor.to_list(length=limit)
+        except Exception as e:
+            logger.error(f"Error getting events with reminders: {str(e)}")
+            raise
+
+    # CHROMA-MONGO MAPPING METHODS
+    async def link_chroma_to_mongo(self, chroma_id: str, mongo_id: str, user_id: str, 
+                                  conversation_id: str = None) -> bool:
+        """Create a link between ChromaDB and MongoDB records"""
+        try:
+            result = await self.db.memories.update_one(
+                {'_id': mongo_id},
+                {
+                    '$set': {
+                        'chroma_id': chroma_id,
+                        'conversation_id': conversation_id,
+                        'updated_at': datetime.utcnow()
+                    }
+                }
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"Error linking ChromaDB to MongoDB: {str(e)}")
+            raise
+
+    async def get_chroma_links(self, user_id: str) -> List[Dict]:
+        """Get all ChromaDB links for a user"""
+        try:
+            query = {
+                'created_by': user_id,
+                'chroma_id': {'$exists': True, '$ne': None}
+            }
+            cursor = self.db.memories.find(query)
+            return await cursor.to_list(length=None)
+        except Exception as e:
+            logger.error(f"Error getting ChromaDB links: {str(e)}")
+            raise
+
+    async def find_mongo_by_chroma_id(self, chroma_id: str) -> Optional[Dict]:
+        """Find MongoDB record by ChromaDB ID"""
+        try:
+            return await self.db.memories.find_one({'chroma_id': chroma_id})
+        except Exception as e:
+            logger.error(f"Error finding MongoDB record by ChromaDB ID: {str(e)}")
+            raise
+
+    async def update_user_notification_preferences(self, user_id: str, preferences: Dict) -> bool:
+        """Update user notification preferences"""
+        try:
+            result = await self.db.users.update_one(
+                {'_id': user_id},
+                {
+                    '$set': {
+                        'notification_preferences': preferences,
+                        'updated_at': datetime.utcnow()
+                    }
+                }
+            )
+            return result.modified_count > 0
+        except Exception as e:
+            logger.error(f"Error updating notification preferences: {str(e)}")
             raise
 
 # Create singleton instance

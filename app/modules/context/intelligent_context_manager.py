@@ -6,9 +6,11 @@ from app.core.ai_security import get_ai_security_manager
 from app.modules.memory.memory_store import get_memory_store
 from app.modules.user_info.user_graph import get_user_graph
 from app.modules.maps.maps_optimizer import get_maps_optimizer
-from app.modules.ai_wrapper.gemini_wrapper import get_gemini_wrapper
+from app.modules.ai_wrapper.user_specific_gemini_wrapper import get_user_specific_gemini_wrapper
 from app.db.mongo_manager import get_mongo_manager
 from app.modules.context.conversation_buffer_manager import ConversationBufferManager
+from app.core.ai_security import get_ai_security_manager
+from app.services.memory_controller import get_memory_controller
 
 class SessionContext:
     def __init__(self, session_id: str):
@@ -47,7 +49,8 @@ class IntelligentContextManager:
         
     async def initialize(self):
         """Initialize the Gemini wrapper, MongoDB, and conversation buffer for intelligent processing"""
-        self.gemini = await get_gemini_wrapper()
+        # Use user-specific wrapper to ensure per-user chat sessions
+        self.gemini = await get_user_specific_gemini_wrapper()
         await self.gemini.initialize()
         
         # Initialize MongoDB manager for general memory storage
@@ -82,6 +85,15 @@ class IntelligentContextManager:
             raise ValueError(f"Session {session_id} not found")
         
         timestamp = datetime.utcnow()
+        # AI security: sanitize and check prompt injection
+        try:
+            ai_sec = get_ai_security_manager()
+            safe_utterance = ai_sec.sanitize_input(utterance)
+            if not ai_sec.check_prompt_injection(safe_utterance):
+                return {"error": "Unsafe input detected", "session_updated": False}
+            utterance = safe_utterance
+        except Exception:
+            pass
         
         # Get LLM analysis of the utterance
         analysis = await self._analyze_utterance_with_llm(utterance, user_id, session)
@@ -253,7 +265,7 @@ Respond with ONLY the JSON object:
         }
     
     async def _store_important_memory(self, session_id: str, memory_event: Dict):
-        """Store chat memories in ChromaDB for semantic search, general memories in MongoDB"""
+        """Store chat memories using LlamaIndex for consistent ChromaDB-MongoDB integration"""
         try:
             memory_content = f"User {memory_event['user_id']}: {memory_event['content']}"
             
@@ -265,35 +277,88 @@ Respond with ONLY the JSON object:
             # Generate conversation_id for linking related messages
             conversation_id = f"{session_id}_{memory_event['timestamp'].strftime('%Y%m%d_%H%M')}"
             
-            # ChromaDB metadata (for semantic vector search of conversations)
-            chroma_metadata = {
+            # Prepare metadata for LlamaIndex
+            llamaindex_metadata = {
                 "session_id": session_id,
                 "conversation_id": conversation_id,
                 "family_tree_id": family_tree_id,
-                "user_id": memory_event["user_id"],
                 "topic": memory_event["analysis"]["topic"],
                 "emotional_state": memory_event["analysis"]["emotional_state"],
                 "importance_score": memory_event["analysis"]["importance_score"],
                 "themes": ",".join(memory_event["analysis"]["themes"]) if memory_event["analysis"]["themes"] else "",
-                "timestamp": memory_event["timestamp"].isoformat(),
-                "reasoning": memory_event["analysis"]["reasoning"]
+                "reasoning": memory_event["analysis"]["reasoning"],
+                "source": "conversation"
             }
             
+            # Use LlamaIndex service for consistent storage
+            try:
+                from app.services.llamaindex_memory_service import get_llamaindex_memory_service
+                llamaindex_service = await get_llamaindex_memory_service()
+                
+                doc_id = await llamaindex_service.store_memory(
+                    user_id=memory_event["user_id"],
+                    content=memory_content,
+                    metadata=llamaindex_metadata,
+                    conversation_id=conversation_id
+                )
+                
+                print(f"✓ Stored memory using LlamaIndex: {doc_id}")
+                
+                return {
+                    "doc_id": doc_id,
+                    "conversation_id": conversation_id,
+                    "method": "llamaindex"
+                }
+                
+            except Exception as e:
+                print(f"⚠️ LlamaIndex storage failed, falling back to manual method: {e}")
+                
+                # Fallback to manual storage if LlamaIndex fails
             # Store conversation semantics in ChromaDB for vector search
             chroma_memory_id = self.memory_store.add_memory(
                 user_id=memory_event["user_id"],
                 content=memory_content,
-                metadata=chroma_metadata
+                metadata=llamaindex_metadata
             )
             
             print(f"✓ Stored conversation semantics in ChromaDB: {chroma_memory_id}")
             
-            # For now, we only store chat semantics in ChromaDB
-            # MongoDB is reserved for structured user data, preferences, family trees, etc.
-            # Not for individual chat memories
+            # Create corresponding MongoDB record for structured data and linking
+            mongo_memory_data = {
+                "created_by": memory_event["user_id"],
+                "content": memory_content,
+                "type": "conversation",
+                "family_tree_id": family_tree_id,
+                "session_id": session_id,
+                "conversation_id": conversation_id,
+                "chroma_id": chroma_memory_id,  # Link to ChromaDB
+                "analysis": memory_event["analysis"],
+                "importance_score": memory_event["analysis"]["importance_score"],
+                "emotional_state": memory_event["analysis"]["emotional_state"],
+                "themes": memory_event["analysis"]["themes"],
+                "visibility": {
+                    "type": "private",
+                    "shared_with": []
+                },
+                "metadata": {
+                    "source": "conversation",
+                    "session_id": session_id,
+                    "conversation_id": conversation_id,
+                    "reasoning": memory_event["analysis"]["reasoning"]
+                }
+            }
+                
+            # Store in MongoDB for structured queries and consistency
+            mongo_manager = await get_mongo_manager()
+            mongo_memory_id = await mongo_manager.create_memory(mongo_memory_data)
+            
+            print(f"✓ Stored memory structure in MongoDB: {mongo_memory_id}")
+            print(f"✓ Linked ChromaDB {chroma_memory_id} ↔ MongoDB {mongo_memory_id}")
             
             return {
-                "chroma_id": chroma_memory_id
+                "chroma_id": chroma_memory_id,
+                "mongo_id": mongo_memory_id,
+                "conversation_id": conversation_id
             }
             
         except Exception as e:
@@ -301,37 +366,17 @@ Respond with ONLY the JSON object:
             return None
     
     async def get_intelligent_context(self, session_id: str, query: str) -> Dict:
-        """Get intelligent context for response generation"""
+        """
+        Get intelligent context for a query using hybrid memory controller.
+        """
         session = self.get_session(session_id)
         if not session:
-            raise ValueError(f"Session {session_id} not found")
-        
-        # Analyze the query to understand what context is needed
-        query_analysis = await self._analyze_utterance_with_llm(query, "system", session)
-        
-        context = {
-            "session_id": session_id,
-            "current_emotional_context": session.emotional_context,
-            "session_themes": session.session_themes,
-            "recent_important_moments": session.memory_worthy_events[-3:],
-            "query_analysis": query_analysis,
-            "conversation_flow": session.conversation_flow[-5:],  # Recent context
-        }
-        
-        # Get relevant memories based on query
-        if session.current_driver:
-            try:
-                relevant_memories = self.memory_store.get_relevant_memories(
-                    user_id=session.current_driver,
-                    query=query,
-                    n_results=3
-                )
-                context["relevant_memories"] = relevant_memories
-            except Exception as e:
-                print(f"Memory retrieval failed: {e}")
-                context["relevant_memories"] = []
-        
-        return context
+            return {"error": f"Session {session_id} not found"}
+
+        # Hybrid context via MemoryController (budgets + retrieval)
+        memc = await get_memory_controller()
+        hybrid_context = await memc.build_hybrid_context(session, query)
+        return hybrid_context
     
     async def generate_intelligent_response(self, session_id: str, query: str, user_id: str) -> str:
         """Generate contextually intelligent response using Queen's personality"""
@@ -364,7 +409,8 @@ Generate a natural, helpful response as Queen:
 """
         
         try:
-            response = await self.gemini.generate_response(response_prompt)
+            # Generate response in the context of the user to keep session-isolated memory
+            response = await self.gemini.generate_response(user_id, response_prompt)
             return response.strip() if isinstance(response, str) else "I'm here to help! How can I assist you?"
             
         except Exception as e:
@@ -376,6 +422,15 @@ Generate a natural, helpful response as Queen:
         if self.conversation_buffer:
             await self.conversation_buffer.end_session(session_id)
         
+        # Maintenance: summarize/decay via memory controller
+        try:
+            session = self.get_session(session_id)
+            if session:
+                memc = await get_memory_controller()
+                await memc.maintain_session(session)
+        except Exception as e:
+            print(f"Session maintenance failed: {e}")
+
         session_summary = self.get_session_summary(session_id)
         
         # Remove session from active sessions

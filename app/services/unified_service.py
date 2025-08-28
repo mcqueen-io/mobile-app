@@ -123,7 +123,7 @@ class UnifiedService:
             return {}
 
     async def search_memories(self, user_ids: List[str], query: str) -> Dict[str, Any]:
-        """Search memories for users"""
+        """Search memories for users using LlamaIndex"""
         if not user_ids:
             return {
                 "memories_found": False,
@@ -133,6 +133,55 @@ class UnifiedService:
             }
 
         try:
+            # Use LlamaIndex for memory search (primary method)
+            try:
+                from app.services.llamaindex_memory_service import get_llamaindex_memory_service
+                llamaindex_service = await get_llamaindex_memory_service()
+                
+                # Search memories for the primary user using LlamaIndex
+                primary_user_id = user_ids[0]
+                memory_results = await llamaindex_service.search_memories(
+                    query=query,
+                    user_id=primary_user_id,
+                    limit=10
+                )
+                
+                if memory_results:
+                    # Format results for compatibility
+                    formatted_results = []
+                    for memory in memory_results:
+                        formatted_results.append({
+                            "id": memory.get("doc_id"),
+                            "content": memory.get("content"),
+                            "metadata": memory.get("metadata", {}),
+                            "score": memory.get("score", 0.0),
+                            "mongo_data": memory.get("mongo_data", {}),
+                            "conversation_id": memory.get("conversation_id"),
+                            "timestamp": memory.get("timestamp")
+                        })
+                    
+                    result = {
+                        "memories_found": True,
+                        "query": query,
+                        "results": self.transformer.format_memory_search_results(formatted_results, self._get_username),
+                        "total_count": len(formatted_results),
+                        "method": "llamaindex"
+                    }
+                else:
+                    result = {
+                        "memories_found": False,
+                        "query": query,
+                        "results": "None found.",
+                        "message": "No relevant memories found for this query.",
+                        "method": "llamaindex"
+                    }
+                
+                return result
+                
+            except Exception as e:
+                logger.warning(f"LlamaIndex memory search failed, falling back to MongoDB: {e}")
+                
+                # Fallback to MongoDB search
             primary_user = await self.get_user(user_ids[0])
             if primary_user:
                 primary_family_id = primary_user['family_tree_id'] if isinstance(primary_user, dict) else primary_user.family_tree_id
@@ -151,14 +200,16 @@ class UnifiedService:
                     "memories_found": True,
                     "query": query,
                     "results": self.transformer.format_memory_search_results(memory_results, self._get_username),
-                    "total_count": len(memory_results)
+                        "total_count": len(memory_results),
+                        "method": "mongodb_fallback"
                 }
             else:
                 result = {
                     "memories_found": False,
                     "query": query,
                     "results": "None found.",
-                    "message": "No relevant memories found for this query."
+                        "message": "No relevant memories found for this query.",
+                        "method": "mongodb_fallback"
                 }
 
             return result
@@ -170,6 +221,57 @@ class UnifiedService:
                 "query": query,
                 "results": "Error during memory search.",
                 "error": str(e)
+            }
+
+    async def get_user_preference(self, user_id: str, preference_key: str) -> Dict[str, Any]:
+        """Retrieve a user's preference by key path.
+
+        preference_key supports dot-notation under the preferences object, e.g.:
+        - "music"
+        - "communication.preferred_language"
+        - "schedule.timezone"
+        """
+        try:
+            await self.ensure_initialized()
+            user = await self.get_user(user_id)
+            if not user:
+                return {
+                    "success": False,
+                    "error": f"User {user_id} not found",
+                    "user_id": user_id,
+                    "preference_key": preference_key
+                }
+
+            # Ensure we are working with a dictionary representation
+            user_dict = user if isinstance(user, dict) else user.model_dump()
+            prefs = user_dict.get("preferences", {})
+
+            # Traverse dot path
+            current = prefs
+            for part in (preference_key or "").split("."):
+                if isinstance(current, dict) and part in current:
+                    current = current[part]
+                else:
+                    return {
+                        "success": False,
+                        "error": f"Preference '{preference_key}' not found",
+                        "user_id": user_id,
+                        "preference_key": preference_key
+                    }
+
+            return {
+                "success": True,
+                "user_id": user_id,
+                "preference_key": preference_key,
+                "value": current
+            }
+        except Exception as e:
+            logger.error(f"Error getting preference for user {user_id}, key {preference_key}: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "user_id": user_id,
+                "preference_key": preference_key
             }
 
     async def _get_username(self, user_id: Optional[str]) -> str:

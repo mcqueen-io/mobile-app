@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     GOOGLE_SEARCH_ENGINE_ID: str = os.getenv("GOOGLE_SEARCH_ENGINE_ID", "")
     
     # Google Maps API Settings
+    # Testing flags
+    USE_MONGOMOCK: bool = os.getenv("USE_MONGOMOCK", "false").lower() == "true"
+
     GOOGLE_MAPS_API_KEY: str = os.getenv("GOOGLE_MAPS_API_KEY", "")
     
     class Config:
