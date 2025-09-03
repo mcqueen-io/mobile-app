@@ -1,0 +1,52 @@
+[
+  {
+    "title": "Add noise suppression and tune VAD (car environment)",
+    "labels": ["speaker-id", "audio", "priority:high", "enhancement"],
+    "body": "Implement front-end noise suppression (WebRTC NS or RNNoise) before VAD; tune VAD aggressiveness to prevent over-clipping in car noise. Include config flags and environment presets. Acceptance: measurable SNR improvement and reduced false VAD cuts in logs."
+  },
+  {
+    "title": "Temporal aggregation and hysteresis for identity smoothing",
+    "labels": ["speaker-id", "ml", "priority:high", "enhancement"],
+    "body": "Aggregate embeddings across sliding windows; majority vote / exponential smoothing for identity; require sustained evidence to switch IDs. Acceptance: lower switch rate and fewer oscillations in multi-speaker sessions."
+  },
+  {
+    "title": "Integrate overlap-aware diarization (pyannote/NeMo)",
+    "labels": ["speaker-id", "asr", "priority:high", "research"],
+    "body": "Replace single-speaker diarization with overlap-aware diarization. Maintain per-track histories and timestamps. Acceptance: correct attribution for overlapping speech segments in tests."
+  },
+  {
+    "title": "Multi-embedding enrollment with augmentation",
+    "labels": ["speaker-id", "ml", "enhancement"],
+    "body": "Store multiple embeddings per user (clean/noisy/varied distance). Add augmentation (noise/reverb/speed). Acceptance: improved identification under car noise in A/B tests."
+  },
+  {
+    "title": "Score normalization (Z/T-norm) and per-environment thresholds",
+    "labels": ["speaker-id", "ml", "enhancement"],
+    "body": "Calibrate cosine scores with Z-norm/T-norm; configurable thresholds for quiet room vs car. Acceptance: better open-set separation and reduced false accepts."
+  },
+  {
+    "title": "Replace disk-based segment extraction with in-memory ring buffer",
+    "labels": ["speaker-id", "performance", "enhancement"],
+    "body": "Implement zero-copy in-memory ring buffer for segment extraction to cut latency and file I/O. Acceptance: reduced p95 segment extraction latency by >50%."
+  },
+  {
+    "title": "Switch to verification mode for known participant sets",
+    "labels": ["speaker-id", "ml", "enhancement"],
+    "body": "When the set of likely participants is known, do 1:K verification instead of 1:N identification; tighten thresholds. Acceptance: higher precision with minimal latency impact."
+  },
+  {
+    "title": "Session-level speaker mapping API and manual override",
+    "labels": ["speaker-id", "api", "ux", "enhancement"],
+    "body": "Expose WS/API to report current speaker map with confidences; allow user to say 'I'm Alice' to correct mapping and re-enroll quickly. Acceptance: override flow updates mapping immediately and persists."
+  },
+  {
+    "title": "Metrics: accuracy, false accepts/rejects, switch rate, latency",
+    "labels": ["speaker-id", "metrics", "observability"],
+    "body": "Instrument counters and dashboards to track identification precision/recall, false accept/reject, ID switch rate, and end-to-end latency. Acceptance: dashboards/exports with weekly trends."
+  },
+  {
+    "title": "Documentation: thresholds, configs, and enrollment best practices",
+    "labels": ["speaker-id", "docs"],
+    "body": "Document recommended thresholds per environment, enrollment scripts, and checklist for robust multi-speaker operation in cars. Acceptance: README section and examples."
+  }
+]
